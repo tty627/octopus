@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "octopus-index"
+version = "0.1.0"
+description = "Local-first, link-centric file indexing CLI"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "tty627" }]
+dependencies = [
+  "typer>=0.15,<1",
+  "pydantic>=2.10,<3",
+  "openai>=1.60,<3",
+  "pypdf>=6,<7",
+  "pypdfium2>=5,<6",
+  "python-docx>=1.1,<2",
+  "openpyxl>=3.1,<4",
+  "python-pptx>=1.0,<2",
+  "Pillow>=11,<13",
+  "rapidocr>=3.0,<4",
+  "onnxruntime>=1.20,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.9,<1",
+  "mypy>=1.14,<2",
+]
+
+[project.scripts]
+octopus = "octopus.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/octopus"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["octopus"]
+omit = [
+  "*/octopus/__main__.py",
+  "*/octopus/cli.py",
+  "*/octopus/markmap.py",
+  "*/octopus/parsers.py",
+  "*/octopus/providers.py",
+  "*/octopus/watcher.py",
+]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["octopus"]
