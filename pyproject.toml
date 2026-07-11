@@ -68,3 +68,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["octopus"]
+
+[[tool.mypy.overrides]]
+module = ["rapidocr"]
+ignore_missing_imports = true

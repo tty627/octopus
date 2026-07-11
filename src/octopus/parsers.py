@@ -50,7 +50,7 @@ def is_plain_text(path: Path) -> bool:
 
 def _rapid_ocr_text(image: Any) -> tuple[str, list[str]]:
     try:
-        from rapidocr import RapidOCR  # type: ignore[import-not-found]
+        from rapidocr import RapidOCR
     except ImportError:
         return "", ["ocr_unavailable"]
     try:
