@@ -31,3 +31,20 @@ bundle.
 Silent installer validation uses `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`; invoke the generated
 uninstaller with the same switches. Both normal and silent cases must confirm that
 `%APPDATA%\Octopus`, Raw, Index and sample data remain intact.
+
+The package workflow runs this validation automatically and emits
+`windows-install-validation.json`. To reproduce it on a Windows validation machine:
+
+```powershell
+.\packaging\validate_windows_install.ps1 `
+  -Installer .\release\Octopus-0.4.0rc1-win-x64-setup.exe `
+  -Checksums .\release\SHA256SUMS.txt `
+  -ExpectedVersion 0.4.0rc1 `
+  -RequireSignature
+```
+
+The script verifies the checksum, installed versions, GUI/CLI smoke tests, silent install and
+uninstall, repository rediscovery after reinstall, and preservation of APPDATA, Raw and Index.
+`-RequireSignature` additionally requires valid Authenticode and RFC 3161 timestamps on the
+installer, installed executables and generated uninstaller. Defender and interactive usability
+remain separate acceptance steps; use `-RunDefender` only on a machine with Microsoft Defender.

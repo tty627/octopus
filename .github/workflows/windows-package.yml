@@ -14,6 +14,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -22,6 +24,13 @@ jobs:
       - run: choco install innosetup --version=6.7.3 -y --no-progress
       - shell: pwsh
         run: .\packaging\build_windows.ps1 -Python python
+      - shell: pwsh
+        run: |
+          $version = (python -c "from octopus import __version__; print(__version__)").Trim()
+          $installer = (Get-ChildItem release\*-setup.exe -File -ErrorAction Stop).FullName
+          .\packaging\validate_windows_install.ps1 -Installer $installer -Checksums release\SHA256SUMS.txt -ExpectedVersion $version -Output release\windows-install-validation.json
+          $hash = (Get-FileHash -Algorithm SHA256 release\windows-install-validation.json).Hash.ToLowerInvariant()
+          Add-Content release\SHA256SUMS.txt "$hash *windows-install-validation.json"
       - uses: actions/upload-artifact@v4
         with:
           name: octopus-windows-development
@@ -33,6 +42,8 @@ jobs:
     environment: code-signing
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -55,7 +66,16 @@ jobs:
       - shell: pwsh
         env:
           TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
-        run: .\packaging\build_windows.ps1 -Python python -Release -CertThumbprint "${{ steps.certificate.outputs.thumbprint }}" -TimestampUrl $env:TIMESTAMP_URL
+        run: |
+          $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          .\packaging\build_windows.ps1 -Python python -Release -CertThumbprint "${{ steps.certificate.outputs.thumbprint }}" -TimestampUrl $env:TIMESTAMP_URL -ExpectedVersion $expectedVersion
+      - shell: pwsh
+        run: |
+          $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          $installer = (Get-ChildItem release\*-setup.exe -File -ErrorAction Stop).FullName
+          .\packaging\validate_windows_install.ps1 -Installer $installer -Checksums release\SHA256SUMS.txt -ExpectedVersion $expectedVersion -RequireSignature -Output release\windows-install-validation.json
+          $hash = (Get-FileHash -Algorithm SHA256 release\windows-install-validation.json).Hash.ToLowerInvariant()
+          Add-Content release\SHA256SUMS.txt "$hash *windows-install-validation.json"
       - uses: actions/upload-artifact@v4
         with:
           name: octopus-windows-signed
@@ -63,4 +83,15 @@ jobs:
       - shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME release\* --verify-tag --generate-notes
+        run: |
+          $releaseArguments = @(
+            "release", "create", $env:GITHUB_REF_NAME,
+            "--verify-tag", "--generate-notes"
+          )
+          if ($env:GITHUB_REF_NAME -match '(a|b|rc)\d+$') {
+            $releaseArguments += "--prerelease"
+          }
+          $releaseArguments += (Get-ChildItem -LiteralPath release -File | ForEach-Object {
+            $_.FullName
+          })
+          & gh @releaseArguments

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
+
+from packaging.version import Version
 
 from octopus import __version__
 from octopus.models import ExtractedDocument, IndexingInfo, RunReport, SchemaInfo, utc_now
@@ -67,7 +72,7 @@ def test_product_version_has_one_source_and_schema_versions_remain_independent()
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["dynamic"] == ["version"]
     assert pyproject["tool"]["hatch"]["version"]["path"] == "src/octopus/__init__.py"
-    assert __version__ == "0.4.0.dev0"
+    assert str(Version(__version__)) == __version__
     assert IndexingInfo().generator_version == __version__
     assert ExtractedDocument(name="x", document_type="text").parser_version == __version__
     report = RunReport(
@@ -79,3 +84,35 @@ def test_product_version_has_one_source_and_schema_versions_remain_independent()
     )
     assert report.version == __version__
     assert SchemaInfo().octopus_schema == "0.2"
+
+
+def test_windows_numeric_versions_order_development_and_prereleases() -> None:
+    script = ROOT / "packaging" / "write_version_info.py"
+    spec = importlib.util.spec_from_file_location("octopus_write_version_info", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    values = [
+        module.windows_numeric_version(value)
+        for value in ("0.4.0.dev0", "0.4.0a1", "0.4.0b1", "0.4.0rc1", "0.4.0")
+    ]
+    numeric = [tuple(int(part) for part in value.split(".")) for value in values]
+    assert numeric == sorted(numeric)
+    result = subprocess.run(
+        [sys.executable, str(script), "--print-numeric"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert re.fullmatch(r"\d+\.\d+\.\d+\.\d+", result.stdout.strip())
+
+
+def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "windows-package.yml").read_text(
+        encoding="utf-8"
+    )
+    installer = (ROOT / "packaging" / "installer.iss").read_text(encoding="utf-8")
+    assert "-ExpectedVersion $expectedVersion" in workflow
+    assert 'releaseArguments += "--prerelease"' in workflow
+    assert "validate_windows_install.ps1" in workflow
+    assert "VersionInfoVersion={#AppNumericVersion}" in installer

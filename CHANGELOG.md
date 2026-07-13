@@ -12,6 +12,7 @@
 - `octopus upgrade check --format table|json` 与 GUI 24 小时缓存的 GitHub 稳定版检查。
 - PyInstaller 6.21 共享 onedir、Inno Setup 6.7.3 每用户离线安装器及受保护签名 CI。
 - 只记录阶段时间、结果、错误码和计数的本地匿名首次体验报告。
+- `octopus acceptance export/summarize` 本地显式导出与多参与者匿名验收汇总。
 
 ### Changed
 
@@ -24,6 +25,7 @@
 
 - 升级检查只接受固定 `tty627/octopus` GitHub Release 路径，3 秒超时且失败不阻断。
 - 发布脚本要求主程序、CLI、卸载器和安装器通过 SHA-256 Authenticode 与 RFC 3161 时间戳。
+- Windows 打包工作流校验 Tag/代码/文件版本一致，并自动验证静默安装、卸载、重装和数据保留。
 
 ## [0.3.0] - 2026-07-13
 

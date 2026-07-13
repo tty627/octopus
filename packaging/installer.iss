@@ -1,6 +1,9 @@
 #ifndef AppVersion
   #define AppVersion "0.4.0.dev0"
 #endif
+#ifndef AppNumericVersion
+  #define AppNumericVersion "0.4.0.0"
+#endif
 
 [Setup]
 AppId={{B858A43D-6D6A-43D8-8EA8-DF66A135A75B}
@@ -26,7 +29,7 @@ CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
 UninstallDisplayIcon={app}\Octopus.exe
-VersionInfoVersion=0.4.0.0
+VersionInfoVersion={#AppNumericVersion}
 VersionInfoProductName=Octopus
 VersionInfoProductVersion={#AppVersion}
 #ifdef SignedBuild

@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .activation import export_activation_records, summarize_activation_exports
 from .config import (
     create_repository,
     load_global_config,
@@ -36,7 +37,7 @@ from .service_control import (
 )
 from .transactions import load_run_report
 from .upgrade import check_for_upgrade
-from .utils import atomic_write_text
+from .utils import atomic_write_json, atomic_write_text
 from .validation import validate_repository
 from .watcher import run_watch_loop, start_watch, stop_watch, watch_status
 
@@ -50,11 +51,13 @@ watch_app = typer.Typer(help="Manage the polling watcher.")
 api_app = typer.Typer(help="Manage the authenticated loopback Local API.")
 service_app = typer.Typer(help="Manage the optional Windows SCM service.")
 upgrade_app = typer.Typer(help="Check for Octopus software updates.")
+acceptance_app = typer.Typer(help="Export and summarize local anonymous acceptance records.")
 app.add_typer(repo_app, name="repo")
 app.add_typer(watch_app, name="watch")
 app.add_typer(api_app, name="api")
 app.add_typer(service_app, name="service")
 app.add_typer(upgrade_app, name="upgrade")
+app.add_typer(acceptance_app, name="acceptance")
 console = Console()
 
 
@@ -76,6 +79,39 @@ def _repository(value: str | None) -> Path:
 def version() -> None:
     """Print the installed Octopus version."""
     console.print(__version__)
+
+
+@acceptance_app.command("export")
+def acceptance_export(
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    product_version: Annotated[str, typer.Option("--version")] = __version__,
+) -> None:
+    """Export only the current candidate's anonymous onboarding records."""
+    try:
+        exported = export_activation_records(output, product_version=product_version)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Unable to export acceptance records:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(json.dumps(exported.model_dump(mode="json"), ensure_ascii=False))
+
+
+@acceptance_app.command("summarize")
+def acceptance_summarize(
+    records: Annotated[list[Path], typer.Option("--records", exists=True)],
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    """Summarize files or directories of one candidate's exports without uploading them."""
+    try:
+        paths: list[Path] = []
+        for path in records:
+            paths.extend(sorted(path.glob("*.json")) if path.is_dir() else [path])
+        summary = summarize_activation_exports(paths)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Unable to summarize acceptance records:[/red] {error}")
+        raise typer.Exit(2) from error
+    if output:
+        atomic_write_json(output, summary.model_dump(mode="json"))
+    console.print_json(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False))
 
 
 @upgrade_app.command("check")

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from octopus.activation import ActivationSession
+from octopus.activation import (
+    ActivationSession,
+    export_activation_records,
+    summarize_activation_export,
+    summarize_activation_exports,
+)
 from octopus.config import (
     create_repository,
     load_global_config,
@@ -106,6 +112,73 @@ def test_activation_record_is_local_and_contains_no_content(
     assert '"file_count": 6' in text
     assert "raw_path" not in text
     assert "query" not in text
+
+
+def test_activation_export_filters_versions_and_summarizes_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    first = ActivationSession(sample_mode=True)
+    first.stage("opened_result")
+    first.finish("success", file_count=6)
+    other = ActivationSession(sample_mode=False)
+    other.record.version = "9.9.9"
+    other.finish("failed", error_code="test_failure")
+
+    output = tmp_path / "candidate.json"
+    exported = export_activation_records(output)
+    summary = summarize_activation_export(output)
+
+    assert exported.record_count == 1
+    assert exported.records[0].session_id == first.record.session_id
+    assert summary.session_count == 1
+    assert summary.success_count == 1
+    assert summary.within_ten_minutes_count == 1
+    assert not summary.meets_v04_session_thresholds
+
+
+def test_activation_export_rejects_private_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    session = ActivationSession(sample_mode=True)
+    payload = session.record.model_dump(mode="json")
+    payload["query"] = "must not be exported"
+    session.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="forbidden private fields"):
+        export_activation_records(tmp_path / "candidate.json")
+
+
+def test_activation_summary_rejects_duplicate_sessions_across_exports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    session = ActivationSession(sample_mode=True)
+    session.finish("success", file_count=6)
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    export_activation_records(first)
+    second.write_bytes(first.read_bytes())
+
+    with pytest.raises(ValueError, match="duplicate session IDs"):
+        summarize_activation_exports([first, second])
+
+
+def test_activation_summary_rechecks_export_privacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    session = ActivationSession(sample_mode=True)
+    session.finish("success", file_count=6)
+    exported = tmp_path / "candidate.json"
+    export_activation_records(exported)
+    payload = json.loads(exported.read_text(encoding="utf-8"))
+    payload["records"][0]["raw_path"] = "C:/private"
+    exported.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="forbidden private fields"):
+        summarize_activation_export(exported)
 
 
 def test_gui_path_and_size_helpers(tmp_path: Path) -> None:
