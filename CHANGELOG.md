@@ -2,7 +2,9 @@
 
 本文档记录 Octopus 的用户可见变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，产品版本遵循 SemVer 和 PEP 440。
 
-## [Unreleased] - v0.3.0.dev0
+## [Unreleased]
+
+## [0.3.0] - 2026-07-13
 
 ### Added
 
@@ -42,6 +44,7 @@
 - PDF、DOCX、XLSX、PPTX、图片/OCR 解析和可选 DeepSeek 摘要。
 - 轮询 Watcher、稳定性状态机、更新日志和 Markmap 输出。
 
-[Unreleased]: docs/releases/v0.3.md
+[Unreleased]: https://github.com/tty627/octopus/compare/v0.3.0...HEAD
+[0.3.0]: docs/releases/v0.3.md
 [0.2.0]: docs/releases/v0.2.md
 [0.1.0]: docs/releases/v0.1.md

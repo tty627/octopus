@@ -5,8 +5,8 @@ without modifying it, writes compact Markdown Leaf and FolderNode indexes to a s
 Repository, and lets people or agents search those indexes without repeatedly opening non-text
 originals.
 
-The current development version is `0.3.0.dev0` on the `v0.3` integration branch. v0.1 and v0.2
-are internal milestones and have no formal Git release tags.
+The current released version is `0.3.0`. v0.1 and v0.2 are internal milestones and have no
+formal Git release tags.
 
 ## Product and release documentation
 
@@ -19,7 +19,7 @@ are internal milestones and have no formal Git release tags.
 
 The `v1.0.1` under `docs/specs/` is a specification revision, not a software release version.
 
-## v0.3 development capabilities
+## v0.3 capabilities
 
 - Strict Raw/Index separation and a guarded read-only Raw access layer.
 - Incremental manifest with the v1.0.1 state set, stability checks, Office lock detection,
