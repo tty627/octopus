@@ -76,7 +76,7 @@ if (-not $checksumLine -or $checksumLine -notmatch '^([0-9a-fA-F]{64}) \*') {
 }
 Assert-FileHash $Installer $Matches[1].ToLowerInvariant() "Installer"
 
-$installerProductVersion = (Get-Item -LiteralPath $Installer).VersionInfo.ProductVersion
+$installerProductVersion = ([string]((Get-Item -LiteralPath $Installer).VersionInfo.ProductVersion)).Trim()
 if ($installerProductVersion -ne $ExpectedVersion) {
     throw "Installer version mismatch: expected $ExpectedVersion, found $installerProductVersion"
 }
