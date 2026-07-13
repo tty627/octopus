@@ -26,7 +26,7 @@ if (-not $PythonCommand) {
 }
 $Python = $PythonCommand.Source
 
-$Version = (& $Python -c "from octopus import __version__; print(__version__)").Trim()
+$Version = (& $Python -c "import sys; sys.path.insert(0, 'src'); from octopus import __version__; print(__version__)").Trim()
 Assert-NativeSuccess "Read product version"
 $NumericVersion = (& $Python packaging\write_version_info.py --print-numeric).Trim()
 Assert-NativeSuccess "Read Windows numeric version"
