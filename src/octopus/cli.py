@@ -7,7 +7,7 @@ import shutil
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Protocol, cast
 
 import typer
 from rich.console import Console
@@ -40,6 +40,22 @@ from .upgrade import check_for_upgrade
 from .utils import atomic_write_json, atomic_write_text
 from .validation import validate_repository
 from .watcher import run_watch_loop, start_watch, stop_watch, watch_status
+
+
+class _ReconfigureTextStream(Protocol):
+    def __call__(self, *, encoding: str, errors: str) -> None: ...
+
+
+def _configure_windows_utf8_output(*streams: object) -> None:
+    if sys.platform != "win32":
+        return
+    for stream in streams or (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            cast(_ReconfigureTextStream, reconfigure)(encoding="utf-8", errors="replace")
+
+
+_configure_windows_utf8_output()
 
 app = typer.Typer(
     name="octopus",

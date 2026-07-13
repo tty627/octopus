@@ -7,12 +7,31 @@ from typer.testing import CliRunner
 
 from octopus import __version__
 from octopus.activation import ActivationSession
-from octopus.cli import app
+from octopus.cli import _configure_windows_utf8_output, app
 from octopus.engine import UpdateEngine
 from octopus.providers import HeuristicProvider
 from octopus.upgrade import UpgradeCheckResult, UpgradeStatus
 
 runner = CliRunner()
+
+
+def test_windows_cli_reconfigures_text_output_as_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingStream:
+        settings: tuple[str, str] | None = None
+
+        def reconfigure(self, *, encoding: str, errors: str) -> None:
+            self.settings = (encoding, errors)
+
+    stdout = RecordingStream()
+    stderr = RecordingStream()
+    monkeypatch.setattr("octopus.cli.sys.platform", "win32")
+
+    _configure_windows_utf8_output(stdout, stderr)
+
+    assert stdout.settings == ("utf-8", "replace")
+    assert stderr.settings == ("utf-8", "replace")
 
 
 def test_upgrade_check_supports_table_and_json(monkeypatch: pytest.MonkeyPatch) -> None:
