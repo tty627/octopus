@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
           architecture: x64
           cache: pip
-      - run: choco install innosetup --version=6.7.3 -y --no-progress
+      - run: choco install innosetup --version=6.7.1 -y --no-progress
       - shell: pwsh
         run: .\packaging\build_windows.ps1 -Python python
       - shell: pwsh
@@ -49,7 +49,7 @@ jobs:
           python-version: "3.12"
           architecture: x64
           cache: pip
-      - run: choco install innosetup --version=6.7.3 -y --no-progress
+      - run: choco install innosetup --version=6.7.1 -y --no-progress
       - id: certificate
         shell: pwsh
         env:

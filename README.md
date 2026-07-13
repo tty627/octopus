@@ -30,7 +30,7 @@ The `v1.0.1` under `docs/specs/` is a specification revision, not a software rel
   one-click retry without changing Raw files.
 - Local top-five search with actions to open the generated index or original source.
 - Cached, non-blocking GitHub stable-release checks through GUI and `octopus upgrade check`.
-- PyInstaller 6.21 shared onedir build plus a per-user Inno Setup 6.7.3 offline-installer pipeline.
+- PyInstaller 6.21 shared onedir build plus a per-user Inno Setup 6.7.1 offline-installer pipeline.
 
 The signed installer and `0.4.0` release remain gated on protected-CI signing, clean Windows 11 VM
 validation and the alpha/RC user acceptance cohorts in the [v0.4 plan](docs/releases/v0.4.md).

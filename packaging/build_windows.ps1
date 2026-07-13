@@ -116,11 +116,11 @@ if (-not $SkipInstaller) {
         $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
     }
     if (-not (Test-Path -LiteralPath $Iscc)) {
-        throw "Inno Setup 6.7.3 compiler not found"
+        throw "Inno Setup 6.7.1 compiler not found"
     }
     $InnoVersion = (Get-Item -LiteralPath $Iscc).VersionInfo.ProductVersion
-    if ($Release -and -not $InnoVersion.StartsWith("6.7.3")) {
-        throw "Release packages require Inno Setup 6.7.3; found $InnoVersion"
+    if ($Release -and -not $InnoVersion.StartsWith("6.7.1")) {
+        throw "Release packages require Inno Setup 6.7.1; found $InnoVersion"
     }
     $Arguments = @("/Qp", "/DAppVersion=$Version", "/DAppNumericVersion=$NumericVersion")
     if ($Release) {

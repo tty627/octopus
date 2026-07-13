@@ -56,7 +56,7 @@ packages = ["src/octopus"]
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 
 [tool.coverage.run]
 source = ["octopus"]
