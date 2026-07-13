@@ -4,6 +4,9 @@ The release build is intentionally Windows-only and must run with Python 3.12 x6
 6.21.0 and Inno Setup 6.7.1. Development builds may use another supported Python, but cannot be
 published as releases.
 
+CI obtains the Simplified Chinese Inno language file from the pinned `is-6_7_1` upstream source
+commit and verifies its SHA-256 before compiling the installer.
+
 ```powershell
 .\packaging\build_windows.ps1 -Python .venv\Scripts\python.exe -SkipInstaller
 ```

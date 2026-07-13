@@ -23,6 +23,8 @@ jobs:
           cache: pip
       - run: choco install innosetup --version=6.7.1 -y --no-progress
       - shell: pwsh
+        run: .\packaging\install_inno_language.ps1
+      - shell: pwsh
         run: .\packaging\build_windows.ps1 -Python python
       - shell: pwsh
         run: |
@@ -50,6 +52,8 @@ jobs:
           architecture: x64
           cache: pip
       - run: choco install innosetup --version=6.7.1 -y --no-progress
+      - shell: pwsh
+        run: .\packaging\install_inno_language.ps1
       - id: certificate
         shell: pwsh
         env:

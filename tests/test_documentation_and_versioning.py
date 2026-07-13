@@ -118,3 +118,10 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert "VersionInfoVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductTextVersion={#AppVersion}" in installer
+    language_installer = (ROOT / "packaging" / "install_inno_language.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "cfdf48923178df4b4f040e038b423aa555a61ffc" in language_installer
+    assert "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278" in (
+        language_installer
+    )
