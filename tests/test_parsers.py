@@ -9,6 +9,7 @@ from pptx import Presentation
 from pptx.util import Inches
 from pypdf import PdfWriter
 
+from octopus import __version__
 from octopus.parsers import ParserRegistry
 
 
@@ -45,11 +46,23 @@ def test_builtin_document_parsers(tmp_path: Path) -> None:
     Image.new("RGB", (16, 16), "white").save(image_path)
 
     registry = ParserRegistry()
-    assert registry.extract(docx_path).document_type == "word"
-    assert registry.extract(xlsx_path).metadata["sheet_names"] == ["Summary"]
-    assert registry.extract(pptx_path).metadata["slide_count"] == 1
-    assert registry.extract(pdf_path).metadata["page_count"] == 1
-    assert registry.extract(image_path).metadata["width"] == 16
+    docx = registry.extract(docx_path)
+    xlsx = registry.extract(xlsx_path)
+    pptx = registry.extract(pptx_path)
+    pdf = registry.extract(pdf_path)
+    image = registry.extract(image_path)
+    assert docx.document_type == "word"
+    assert docx.parser_version == __version__
+    assert any(item.kind == "heading" for item in docx.evidence)
+    assert xlsx.metadata["sheet_names"] == ["Summary"]
+    assert xlsx.extraction_stats["sampled_formulas"] == 1
+    assert xlsx.evidence[0].locator == "sheet:Summary"
+    assert pptx.metadata["slide_count"] == 1
+    assert int(pptx.extraction_stats["shapes"]) >= 1
+    assert pdf.metadata["page_count"] == 1
+    assert pdf.evidence[0].locator == "page:1"
+    assert image.metadata["width"] == 16
+    assert image.extraction_stats["frames"] == 1
 
 
 def test_unsupported_parser_emits_explicit_flag(tmp_path: Path) -> None:
@@ -58,3 +71,14 @@ def test_unsupported_parser_emits_explicit_flag(tmp_path: Path) -> None:
     result = ParserRegistry().extract(path)
     assert result.unsupported
     assert result.quality_flags == ["unsupported_content_parser"]
+
+
+def test_text_parser_reports_bounded_extraction(tmp_path: Path) -> None:
+    path = tmp_path / "long.md"
+    original = "# Heading\n" + ("content " * 12_000)
+    path.write_text(original, encoding="utf-8")
+    result = ParserRegistry().extract(path)
+    assert result.truncated
+    assert result.text_characters == len(original)
+    assert result.evidence[0].kind == "heading"
+    assert len(result.text) < len(original)

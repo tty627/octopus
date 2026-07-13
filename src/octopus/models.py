@@ -5,7 +5,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+from . import __version__
+from .prompts import PROMPT_VERSION
 
 
 def utc_now() -> str:
@@ -86,6 +89,16 @@ class AIConfig(OctopusModel):
     max_transport_retries: int = 3
     json_repair_attempts: int = 1
     enabled: bool = True
+    input_cost_per_million: float | None = Field(default=None, ge=0)
+    output_cost_per_million: float | None = Field(default=None, ge=0)
+    prompt_version: str = PROMPT_VERSION
+    max_input_characters_per_request: int = Field(default=80_000, ge=1, le=1_000_000)
+    max_output_tokens_per_request: int = Field(default=2_000, ge=1, le=32_000)
+    max_input_tokens_per_run: int | None = Field(default=None, ge=1)
+    max_output_tokens_per_run: int | None = Field(default=None, ge=1)
+    max_estimated_cost_per_run: float | None = Field(default=None, ge=0)
+    max_search_candidates: int = Field(default=30, ge=1, le=100)
+    max_folder_children_per_request: int = Field(default=500, ge=1, le=5_000)
 
 
 class IgnoreConfig(OctopusModel):
@@ -114,12 +127,22 @@ class GlobalRepository(OctopusModel):
     raw_repo_id: str
     name: str
     index_repository_path: str
+    enabled: bool = True
+
+
+class ServiceConfig(OctopusModel):
+    host: str = "127.0.0.1"
+    port: int = Field(default=8765, ge=1024, le=65535)
+    scheduler_enabled: bool = True
+    max_background_workers: int = Field(default=2, ge=1, le=8)
+    allowed_origins: list[str] = Field(default_factory=list)
 
 
 class GlobalConfig(OctopusModel):
     schema_version: str = "0.1"
     active_repository_id: str | None = None
     repositories: dict[str, GlobalRepository] = Field(default_factory=dict)
+    service: ServiceConfig = Field(default_factory=ServiceConfig)
 
 
 class Fingerprint(OctopusModel):
@@ -147,7 +170,7 @@ class IndexingInfo(OctopusModel):
     retry_count: int = 0
     last_error: str = ""
     error_code: str = ""
-    generator_version: str = "0.1.0"
+    generator_version: str = __version__
     section_hashes: dict[str, str] = Field(default_factory=dict)
 
 
@@ -224,7 +247,7 @@ class UpdateControl(OctopusModel):
     dirty_reasons: list[str] = Field(default_factory=list)
     pending_child_count: int = 0
     failed_child_count: int = 0
-    generator_version: str = "0.1.0"
+    generator_version: str = __version__
 
 
 class LeafHeader(OctopusModel):
@@ -253,6 +276,14 @@ class FolderNodeHeader(OctopusModel):
     update_control: UpdateControl
 
 
+class ExtractionEvidence(OctopusModel):
+    locator: str
+    kind: str
+    text_excerpt: str = ""
+    extraction_method: str = "native"
+    confidence: float | None = None
+
+
 class ExtractedDocument(OctopusModel):
     name: str
     document_type: str
@@ -261,6 +292,11 @@ class ExtractedDocument(OctopusModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     quality_flags: list[str] = Field(default_factory=list)
     unsupported: bool = False
+    parser_version: str = __version__
+    text_characters: int = 0
+    truncated: bool = False
+    evidence: list[ExtractionEvidence] = Field(default_factory=list)
+    extraction_stats: dict[str, int | float | str | bool] = Field(default_factory=dict)
 
 
 class GeneratedSummary(OctopusModel):
@@ -269,6 +305,36 @@ class GeneratedSummary(OctopusModel):
     tag_rough: list[str] = Field(default_factory=list)
     topic_keywords: list[str] = Field(default_factory=list)
     recommended_reading: list[str] = Field(default_factory=list)
+
+
+class AIUsage(OctopusModel):
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    duration_ms: int = 0
+    models: dict[str, int] = Field(default_factory=dict)
+    prompt_versions: dict[str, int] = Field(default_factory=dict)
+    purposes: dict[str, int] = Field(default_factory=dict)
+    errors: dict[str, int] = Field(default_factory=dict)
+    estimated_cost: float | None = None
+
+    def add(self, other: AIUsage) -> None:
+        self.calls += other.calls
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.total_tokens += other.total_tokens
+        self.duration_ms += other.duration_ms
+        for key, value in other.models.items():
+            self.models[key] = self.models.get(key, 0) + value
+        for key, value in other.prompt_versions.items():
+            self.prompt_versions[key] = self.prompt_versions.get(key, 0) + value
+        for key, value in other.purposes.items():
+            self.purposes[key] = self.purposes.get(key, 0) + value
+        for key, value in other.errors.items():
+            self.errors[key] = self.errors.get(key, 0) + value
+        if other.estimated_cost is not None:
+            self.estimated_cost = (self.estimated_cost or 0.0) + other.estimated_cost
 
 
 class SearchDocument(OctopusModel):
@@ -287,6 +353,143 @@ class SearchDocument(OctopusModel):
 
 class SearchResult(SearchDocument):
     score: float = 0.0
+    matched_terms: list[str] = Field(default_factory=list)
+    match_reasons: list[str] = Field(default_factory=list)
+
+
+class SearchCitation(OctopusModel):
+    citation_id: str
+    node_id: str
+    name: str
+    index_type: Literal["leaf", "foldernode"]
+    index_path: str
+    status: str = "clean"
+    summary: str = ""
+
+
+class GeneratedSearchAnswer(OctopusModel):
+    summary: str
+    recommended_node_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    cited_node_ids: list[str] = Field(default_factory=list)
+
+
+class SearchReport(OctopusModel):
+    query: str
+    answer: GeneratedSearchAnswer
+    results: list[SearchResult]
+    citations: list[SearchCitation] = Field(default_factory=list)
+    ai_usage: AIUsage = Field(default_factory=AIUsage)
+
+
+class TransactionStatus(StrEnum):
+    started = "started"
+    staged = "staged"
+    committing = "committing"
+    committed = "committed"
+    rolled_back = "rolled_back"
+    recovery_required = "recovery_required"
+
+
+class TransactionOperation(OctopusModel):
+    relative_path: str
+    action: Literal["write", "delete"] = "write"
+    staged_relative_path: str = ""
+    backup_relative_path: str = ""
+    existed_before: bool = False
+    applied: bool = False
+    is_manifest: bool = False
+
+
+class TransactionRecord(OctopusModel):
+    run_id: str
+    status: TransactionStatus = TransactionStatus.started
+    started_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+    manifest_committed: bool = False
+    operations: list[TransactionOperation] = Field(default_factory=list)
+    error: str = ""
+
+
+class RunReport(OctopusModel):
+    run_id: str
+    version: str = __version__
+    repository_id: str
+    started_at: str
+    finished_at: str
+    duration_ms: int = 0
+    status: Literal["success", "partial", "failed", "dry_run"]
+    stats: dict[str, Any] = Field(default_factory=dict)
+    ai_usage: AIUsage = Field(default_factory=AIUsage)
+    errors: list[dict[str, str]] = Field(default_factory=list)
+    recovery_actions: list[str] = Field(default_factory=list)
+    dry_run: bool = False
+
+
+class DryRunPlan(OctopusModel):
+    scan_generation: int
+    discovered: int
+    new: int
+    modified: int
+    moved: int
+    deleted: int
+    pending: int
+    stability: dict[str, str] = Field(default_factory=dict)
+    leaf_updates: list[str] = Field(default_factory=list)
+    text_updates: list[str] = Field(default_factory=list)
+    foldernode_updates: list[str] = Field(default_factory=list)
+    estimated_ai_calls: int = 0
+
+
+class ValidationSeverity(StrEnum):
+    warning = "warning"
+    error = "error"
+
+
+class ValidationIssue(OctopusModel):
+    severity: ValidationSeverity
+    code: str
+    message: str
+    path: str = ""
+
+
+class ValidationReport(OctopusModel):
+    repository_id: str
+    checked_at: str = Field(default_factory=utc_now)
+    issues: list[ValidationIssue] = Field(default_factory=list)
+    markdown_indexes: int = 0
+    manifest_nodes: int = 0
+    search_documents: int = 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def error_count(self) -> int:
+        return sum(issue.severity == ValidationSeverity.error for issue in self.issues)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def warning_count(self) -> int:
+        return sum(issue.severity == ValidationSeverity.warning for issue in self.issues)
+
+
+class JobStatus(StrEnum):
+    queued = "queued"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+
+
+class ServiceJob(OctopusModel):
+    job_id: str
+    repository_id: str
+    kind: Literal["update", "rebuild_search", "validate"]
+    status: JobStatus = JobStatus.queued
+    created_at: str = Field(default_factory=utc_now)
+    started_at: str = ""
+    finished_at: str = ""
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_code: str = ""
+    error_message: str = ""
 
 
 class ContentParser(Protocol):
@@ -296,6 +499,8 @@ class ContentParser(Protocol):
 
 
 class AIProvider(Protocol):
+    usage: AIUsage
+
     def generate_leaf(self, document: ExtractedDocument) -> GeneratedSummary: ...
 
     def summarize_folder(
@@ -303,3 +508,5 @@ class AIProvider(Protocol):
     ) -> GeneratedSummary: ...
 
     def rerank_search(self, query: str, results: list[SearchResult]) -> list[SearchResult]: ...
+
+    def compose_search(self, query: str, results: list[SearchResult]) -> GeneratedSearchAnswer: ...

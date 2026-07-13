@@ -11,6 +11,7 @@ from octopus.config import (
     validate_repository_paths,
 )
 from octopus.filesystem import RawRepository, ensure_outside_raw
+from octopus.models import RepositoryConfig
 
 
 def test_repository_registration_and_resolution(repository: tuple[Path, Path, object]) -> None:
@@ -41,3 +42,25 @@ def test_read_only_boundary_prevents_escape_and_write(
     with pytest.raises(PermissionError):
         ensure_outside_raw(raw / "generated.md", raw)
     ensure_outside_raw(index / "generated.md", raw)
+
+
+def test_v02_configuration_loads_v03_defaults(
+    repository: tuple[Path, Path, object],
+) -> None:
+    _, _, config = repository
+    payload = config.model_dump(mode="json", by_alias=True)
+    for field in [
+        "prompt_version",
+        "max_input_characters_per_request",
+        "max_output_tokens_per_request",
+        "max_input_tokens_per_run",
+        "max_output_tokens_per_run",
+        "max_estimated_cost_per_run",
+        "max_search_candidates",
+        "max_folder_children_per_request",
+    ]:
+        payload["ai_policy"].pop(field, None)
+    loaded = RepositoryConfig.model_validate(payload)
+    assert loaded.schema_.octopus_schema == "0.2"
+    assert loaded.ai_policy.prompt_version.startswith("octopus-0.3")
+    assert loaded.ai_policy.max_search_candidates == 30

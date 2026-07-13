@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .models import (
     ExtractedDocument,
     FolderNodeHeader,
@@ -148,6 +149,9 @@ def render_leaf(
                     "remarks": "",
                 }
             ],
+            "extraction_evidence": [
+                item.model_dump(mode="json", exclude_none=True) for item in document.evidence
+            ],
         },
         extraction_policy={
             "default_read_scope": "summary_layer_only",
@@ -159,6 +163,10 @@ def render_leaf(
                 "agent_needs_markmap_or_export_link",
             ],
             "do_not_use_attachment_card_layer_for_initial_routing": True,
+            "parser_version": document.parser_version,
+            "text_characters": document.text_characters,
+            "truncated": document.truncated,
+            "extraction_stats": document.extraction_stats,
         },
         update_control=UpdateControl(
             index_status=NodeState.failed if document.unsupported else NodeState.indexed,
@@ -170,6 +178,13 @@ def render_leaf(
     )
     structure = "\n".join(f"- {item}" for item in document.structure) or "- 未提取到结构信息。"
     quality = "\n".join(f"- {item}" for item in document.quality_flags) or "- 未发现已知质量问题。"
+    evidence = (
+        "\n".join(
+            f"- `{item.locator}` · {item.kind} · {item.text_excerpt or '仅结构定位'}"
+            for item in document.evidence[:20]
+        )
+        or "- 未生成可引用的内部定位。"
+    )
     reading = "\n".join(
         f"{index}. {item}" for index, item in enumerate(summary.recommended_reading, 1)
     )
@@ -187,6 +202,10 @@ def render_leaf(
 
 {reading or "1. 根据任务需要查看上述结构定位。"}
 
+## 解析证据定位
+
+{evidence}
+
 ## 提取质量
 
 {quality}
@@ -203,7 +222,7 @@ def render_leaf(
 
 ### 维护日志
 
-- {utc_now()}: Octopus v0.1 生成或更新索引。
+- {utc_now()}: Octopus {__version__} 生成或更新索引。
 """
     return (
         json.dumps(
@@ -411,7 +430,7 @@ def render_foldernode(
 
 ### 维护日志
 
-- {utc_now()}: Octopus v0.1 生成或更新索引。
+- {utc_now()}: Octopus {__version__} 生成或更新索引。
 """
     return (
         json.dumps(

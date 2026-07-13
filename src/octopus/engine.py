@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from contextlib import suppress
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from . import __version__
 from .config import (
     load_repository_config,
     load_repository_state,
@@ -16,13 +20,20 @@ from .filesystem import ensure_outside_raw
 from .locking import RepositoryLock
 from .logging import UpdateLogger
 from .models import (
+    DryRunPlan,
     GeneratedSummary,
     NodeRecord,
     NodeState,
+    RunReport,
     utc_now,
 )
 from .parsers import ParserRegistry, TextParser, is_plain_text
-from .providers import HeuristicProvider, create_provider
+from .providers import (
+    HeuristicProvider,
+    ProviderRateLimitError,
+    ProviderTransientError,
+    create_provider,
+)
 from .rendering import (
     collision_safe_path,
     foldernode_filename,
@@ -31,10 +42,15 @@ from .rendering import (
     render_foldernode,
     render_leaf,
     validate_index_text,
-    write_url_shortcut,
 )
 from .scanner import RepositoryScanner, ScanOutcome
-from .utils import atomic_write_json, atomic_write_text, sha256_file, stable_text_hash
+from .transactions import (
+    IndexTransaction,
+    mark_transaction_complete,
+    recover_transactions,
+    write_run_report,
+)
+from .utils import sha256_file, stable_text_hash
 
 
 @dataclass
@@ -62,6 +78,8 @@ class UpdateEngine:
         self.provider = create_provider(self.config)
         self.heuristic = HeuristicProvider()
         self.logger = UpdateLogger(octopus_dir(self.index))
+        self.transaction: IndexTransaction | None = None
+        self.run_errors: list[dict[str, str]] = []
         self.stats = UpdateStats(
             ai_provider="deepseek"
             if type(self.provider).__name__ == "DeepSeekProvider"
@@ -86,7 +104,6 @@ class UpdateEngine:
                 relative = ""
         directory = self.index / Path(relative.replace("/", os.sep))
         ensure_outside_raw(directory, self.raw)
-        directory.mkdir(parents=True, exist_ok=True)
         return directory
 
     def _write_shortcuts(self, node: NodeRecord) -> None:
@@ -97,7 +114,9 @@ class UpdateEngine:
         else:
             path = directory / f"{source.name}.url"
         ensure_outside_raw(path, self.raw)
-        write_url_shortcut(path, source)
+        if self.transaction is None:
+            raise RuntimeError("Index writes require an active transaction")
+        self.transaction.write_text(path, f"[InternetShortcut]\nURL={source.resolve().as_uri()}\n")
 
     def _old_text(self, node: NodeRecord, fallback_path: Path) -> tuple[str | None, Path | None]:
         candidates: list[Path] = []
@@ -111,6 +130,30 @@ class UpdateEngine:
                 except OSError:
                     continue
         return None, None
+
+    def _stage_text(self, path: Path, text: str) -> None:
+        if self.transaction is None:
+            raise RuntimeError("Index writes require an active transaction")
+        self.transaction.write_text(path, text)
+
+    def _record_failure(self, node: NodeRecord, error: Exception) -> None:
+        recoverable = isinstance(error, (ProviderRateLimitError, ProviderTransientError))
+        node.state = NodeState.retry if recoverable else NodeState.failed
+        node.indexing.last_error = str(error)[:1000]
+        node.indexing.error_code = type(error).__name__
+        node.indexing.retry_count += 1
+        if recoverable and node.node_id not in self.state.queues.retry:
+            self.state.queues.retry.append(node.node_id)
+        elif not recoverable and node.node_id not in self.state.queues.failed:
+            self.state.queues.failed.append(node.node_id)
+        self.stats.failed += 1
+        self.run_errors.append(
+            {
+                "node_id": node.node_id,
+                "code": type(error).__name__,
+                "message": str(error)[:500],
+            }
+        )
 
     def _process_leaf(self, node: NodeRecord) -> None:
         source = self._source_path(node)
@@ -140,14 +183,17 @@ class UpdateEngine:
             summary = self.provider.generate_leaf(document)
             rendered = render_leaf(self.config, node, source, document, summary, old_text)
             validate_index_text(rendered, "leaf")
-            atomic_write_text(destination, rendered)
+            self._stage_text(destination, rendered)
             if old_path and old_path != destination:
-                old_path.unlink(missing_ok=True)
+                if self.transaction is None:
+                    raise RuntimeError("Index writes require an active transaction")
+                self.transaction.schedule_delete(old_path)
             node.index_relative_path = destination.relative_to(self.index).as_posix()
             node.indexing.last_indexed_at = utc_now()
             node.indexing.last_successful_index_at = utc_now()
             node.indexing.last_error = ""
             node.indexing.error_code = ""
+            node.indexing.generator_version = __version__
             node.indexing.section_hashes = {
                 "generated_document": stable_text_hash(rendered),
             }
@@ -167,19 +213,7 @@ class UpdateEngine:
                 f"Indexed {node.raw_relative_path}",
             )
         except Exception as error:
-            recoverable = any(
-                token in type(error).__name__
-                for token in ("RateLimit", "APIConnection", "APITimeout", "InternalServer")
-            )
-            node.state = NodeState.retry if recoverable else NodeState.failed
-            node.indexing.last_error = str(error)[:1000]
-            node.indexing.error_code = type(error).__name__
-            node.indexing.retry_count += 1
-            if recoverable and node.node_id not in self.state.queues.retry:
-                self.state.queues.retry.append(node.node_id)
-            elif not recoverable and node.node_id not in self.state.queues.failed:
-                self.state.queues.failed.append(node.node_id)
-            self.stats.failed += 1
+            self._record_failure(node, error)
             self.logger.event(
                 "leaf_failed",
                 node.node_id,
@@ -204,7 +238,7 @@ class UpdateEngine:
             control["pending_reason"] = node.pending_reason
             text = json.dumps(header, ensure_ascii=False, indent=2) + "\n\n" + body
             validate_index_text(text, "leaf")
-            atomic_write_text(path, text)
+            self._stage_text(path, text)
         except (OSError, ValueError, json.JSONDecodeError) as error:
             self.logger.event(
                 "leaf_status_sync_failed",
@@ -254,10 +288,13 @@ class UpdateEngine:
             common["node_type"] = "leaf"
         if child.index_relative_path:
             index_path = self.index / Path(child.index_relative_path.replace("/", os.sep))
-            common["index_link"] = index_path.resolve().as_uri() if index_path.exists() else ""
-            if index_path.exists():
+            readable_path = (
+                self.transaction.staged_path_for(index_path) if self.transaction else None
+            ) or index_path
+            common["index_link"] = index_path.resolve().as_uri() if readable_path.exists() else ""
+            if readable_path.exists():
                 try:
-                    header, _ = read_machine_header(index_path)
+                    header, _ = read_machine_header(readable_path)
                     layer = header.get("summary_layer", {})
                     common.update(
                         one_sentence_summary=layer.get("one_sentence_summary", ""),
@@ -356,14 +393,17 @@ class UpdateEngine:
                 old_text,
             )
             validate_index_text(rendered, "foldernode")
-            atomic_write_text(destination, rendered)
+            self._stage_text(destination, rendered)
             if old_path and old_path != destination:
-                old_path.unlink(missing_ok=True)
+                if self.transaction is None:
+                    raise RuntimeError("Index writes require an active transaction")
+                self.transaction.schedule_delete(old_path)
             node.index_relative_path = destination.relative_to(self.index).as_posix()
             node.indexing.last_indexed_at = utc_now()
             node.indexing.last_successful_index_at = utc_now()
             node.indexing.last_error = ""
             node.indexing.error_code = ""
+            node.indexing.generator_version = __version__
             node.indexing.section_hashes = {"generated_document": stable_text_hash(rendered)}
             node.state = NodeState.clean
             self.stats.foldernode_updated += 1
@@ -375,19 +415,7 @@ class UpdateEngine:
                 f"Indexed folder {node.raw_relative_path or '/'}",
             )
         except Exception as error:
-            recoverable = any(
-                token in type(error).__name__
-                for token in ("RateLimit", "APIConnection", "APITimeout", "InternalServer")
-            )
-            node.state = NodeState.retry if recoverable else NodeState.failed
-            node.indexing.last_error = str(error)[:1000]
-            node.indexing.error_code = type(error).__name__
-            node.indexing.retry_count += 1
-            if recoverable and node.node_id not in self.state.queues.retry:
-                self.state.queues.retry.append(node.node_id)
-            elif not recoverable and node.node_id not in self.state.queues.failed:
-                self.state.queues.failed.append(node.node_id)
-            self.stats.failed += 1
+            self._record_failure(node, error)
             self.logger.event(
                 "foldernode_failed",
                 node.node_id,
@@ -396,43 +424,100 @@ class UpdateEngine:
                 error=str(error)[:1000],
             )
 
-    def _begin_transaction(self) -> Path:
-        transaction = octopus_dir(self.index) / "transactions" / "current.json"
-        if transaction.exists():
-            try:
-                old = json.loads(transaction.read_text(encoding="utf-8"))
-                if old.get("status") == "started":
-                    self.logger.event(
-                        "transaction_recovery",
-                        message=(
-                            f"Recovered incomplete run {old.get('run_id', 'unknown')}; "
-                            "manifest remains authoritative"
-                        ),
-                    )
-            except (OSError, json.JSONDecodeError):
-                pass
-        atomic_write_json(
-            transaction,
-            {
-                "run_id": f"scan-{self.state.scan.scan_generation + 1}",
-                "status": "started",
-                "started_at": utc_now(),
-            },
+    def plan(self, *, force_path: str | None = None) -> DryRunPlan:
+        planned_state = self.state.model_copy(deep=True)
+        planned_state, outcome = RepositoryScanner(self.config).scan(
+            planned_state, force_path=force_path
         )
-        return transaction
+        leaf_updates: list[str] = []
+        text_updates: list[str] = []
+        for node in planned_state.nodes.values():
+            if node.node_kind != "raw_file" or node.state not in {
+                NodeState.queued,
+                NodeState.moved,
+                NodeState.retry,
+            }:
+                continue
+            source = self.raw / Path(node.raw_relative_path.replace("/", os.sep))
+            if source.exists() and is_plain_text(source):
+                text_updates.append(node.raw_relative_path)
+            else:
+                leaf_updates.append(node.raw_relative_path)
+        folder_updates = [
+            node.raw_relative_path
+            for node in planned_state.nodes.values()
+            if node.node_kind == "raw_folder"
+            and node.state not in {NodeState.orphaned, NodeState.ignored}
+        ]
+        ai_folders = sum(
+            1
+            for node in planned_state.nodes.values()
+            if node.node_kind == "raw_folder"
+            and (node.state == NodeState.dirty or not node.index_relative_path)
+        )
+        return DryRunPlan(
+            scan_generation=planned_state.scan.scan_generation,
+            discovered=outcome.discovered,
+            new=outcome.new,
+            modified=outcome.modified,
+            moved=outcome.moved,
+            deleted=outcome.deleted,
+            pending=outcome.pending,
+            stability={
+                node.raw_relative_path: node.state.value
+                for node in sorted(
+                    planned_state.nodes.values(), key=lambda item: item.raw_relative_path
+                )
+                if node.node_kind == "raw_file"
+                and node.state
+                in {
+                    NodeState.pending_edit,
+                    NodeState.pending_stable,
+                    NodeState.queued,
+                    NodeState.moved,
+                    NodeState.retry,
+                    NodeState.failed,
+                }
+            },
+            leaf_updates=sorted(leaf_updates),
+            text_updates=sorted(text_updates),
+            foldernode_updates=sorted(folder_updates),
+            estimated_ai_calls=(
+                len(leaf_updates) + ai_folders if self.config.ai_policy.enabled else 0
+            ),
+        )
 
-    def _commit(self, transaction: Path) -> None:
-        self.state.repository.last_successful_update_at = utc_now()
-        atomic_write_json(
-            repository_state_path(self.index), self.state.model_dump(mode="json", by_alias=True)
+    def _report(
+        self,
+        run_id: str,
+        started_at: str,
+        status: Literal["success", "partial", "failed", "dry_run"],
+        recovery_actions: list[str],
+        *,
+        dry_run: bool = False,
+    ) -> RunReport:
+        finished_at = utc_now()
+        duration_ms = max(
+            0,
+            int(
+                (
+                    datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
+                ).total_seconds()
+                * 1000
+            ),
         )
-        atomic_write_json(
-            transaction,
-            {
-                "run_id": f"scan-{self.state.scan.scan_generation}",
-                "status": "committed",
-                "committed_at": utc_now(),
-            },
+        return RunReport(
+            run_id=run_id,
+            repository_id=self.config.repository.raw_repo_id,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            status=status,
+            stats=asdict(self.stats),
+            ai_usage=self.provider.usage.model_copy(deep=True),
+            errors=list(self.run_errors),
+            recovery_actions=recovery_actions,
+            dry_run=dry_run,
         )
 
     def run(
@@ -444,58 +529,123 @@ class UpdateEngine:
         retry_only: bool = False,
         force_path: str | None = None,
     ) -> UpdateStats:
+        run_id = uuid.uuid4().hex
+        started_at = utc_now()
+        recovery_actions: list[str] = []
         lock_path = octopus_dir(self.index) / "update.lock"
-        with RepositoryLock(
-            lock_path,
-            "update",
-            self.config.repository.raw_repo_id,
-            self.index,
-        ):
-            transaction = self._begin_transaction()
-            scanner = RepositoryScanner(self.config)
-            self.state, outcome = scanner.scan(self.state, force_path=force_path)
-            self._apply_scan_stats(outcome)
-            if scan_only:
-                self._commit(transaction)
-                self.logger.run_summary(asdict(self.stats))
-                return self.stats
-
-            file_nodes = [
-                node for node in self.state.nodes.values() if node.node_kind == "raw_file"
-            ]
-            for node in file_nodes:
-                if node.state not in {NodeState.queued, NodeState.moved, NodeState.indexing}:
-                    self._sync_existing_leaf_status(node)
-                should_process = node.state in {NodeState.queued, NodeState.moved}
-                if retry_only:
-                    should_process = node.state in {NodeState.failed, NodeState.retry}
-                if foldernode_only:
-                    should_process = False
-                if should_process:
-                    self._process_leaf(node)
-
-            if not leaf_only:
-                folder_nodes = [
-                    node
-                    for node in self.state.nodes.values()
-                    if node.node_kind == "raw_folder" and node.state != NodeState.orphaned
+        try:
+            with RepositoryLock(
+                lock_path,
+                "update",
+                self.config.repository.raw_repo_id,
+                self.index,
+            ):
+                recovery_actions = recover_transactions(self.index)
+                derived_runs = [
+                    action.split(":", 1)[1]
+                    for action in recovery_actions
+                    if action.startswith("complete-derived:")
                 ]
-                folder_nodes.sort(
-                    key=lambda item: len(Path(item.raw_relative_path).parts), reverse=True
+                if derived_runs:
+                    from .search import SearchIndex
+
+                    SearchIndex(self.index).rebuild()
+                    for recovered_run in derived_runs:
+                        mark_transaction_complete(self.index, recovered_run)
+                for action in recovery_actions:
+                    self.logger.event("transaction_recovery", message=action)
+
+                transaction = IndexTransaction(self.index, run_id=run_id)
+                self.transaction = transaction
+                scanner = RepositoryScanner(self.config)
+                self.state, outcome = scanner.scan(self.state, force_path=force_path)
+                self._apply_scan_stats(outcome)
+
+                if not scan_only:
+                    file_nodes = [
+                        node for node in self.state.nodes.values() if node.node_kind == "raw_file"
+                    ]
+                    for node in file_nodes:
+                        if node.state not in {
+                            NodeState.queued,
+                            NodeState.moved,
+                            NodeState.indexing,
+                        }:
+                            self._sync_existing_leaf_status(node)
+                        should_process = node.state in {NodeState.queued, NodeState.moved}
+                        if retry_only:
+                            should_process = node.state in {NodeState.failed, NodeState.retry}
+                        if foldernode_only:
+                            should_process = False
+                        if should_process:
+                            self._process_leaf(node)
+
+                    if not leaf_only:
+                        folder_nodes = [
+                            node
+                            for node in self.state.nodes.values()
+                            if node.node_kind == "raw_folder" and node.state != NodeState.orphaned
+                        ]
+                        folder_nodes.sort(
+                            key=lambda item: len(Path(item.raw_relative_path).parts),
+                            reverse=True,
+                        )
+                        for node in folder_nodes:
+                            self._process_folder(node)
+
+                self.state.repository.last_successful_update_at = utc_now()
+                manifest_text = (
+                    json.dumps(
+                        self.state.model_dump(mode="json", by_alias=True),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n"
                 )
-                for node in folder_nodes:
-                    self._process_folder(node)
+                transaction.commit(repository_state_path(self.index), manifest_text)
 
-            self._commit(transaction)
-            try:
-                from .search import SearchIndex
+                derived_ok = True
+                if not scan_only:
+                    try:
+                        from .search import SearchIndex
 
-                SearchIndex(self.index).rebuild()
-            except Exception as error:
-                self.logger.event("search_rebuild_failed", error=str(error)[:1000])
-                self.stats.failed += 1
-            self.logger.run_summary(asdict(self.stats))
-            return self.stats
+                        SearchIndex(self.index).rebuild()
+                    except Exception as error:
+                        derived_ok = False
+                        self.logger.event("search_rebuild_failed", error=str(error)[:1000])
+                        self.run_errors.append(
+                            {
+                                "node_id": "",
+                                "code": type(error).__name__,
+                                "message": str(error)[:500],
+                            }
+                        )
+                        self.stats.failed += 1
+                self.logger.run_summary(asdict(self.stats))
+                if derived_ok:
+                    mark_transaction_complete(self.index, run_id)
+                status: Literal["success", "partial"] = (
+                    "partial" if self.stats.failed else "success"
+                )
+                write_run_report(
+                    self.index,
+                    self._report(run_id, started_at, status, recovery_actions),
+                )
+                return self.stats
+        except Exception as error:
+            self.run_errors.append(
+                {
+                    "node_id": "",
+                    "code": type(error).__name__,
+                    "message": str(error)[:500],
+                }
+            )
+            report = self._report(run_id, started_at, "failed", recovery_actions)
+            with suppress(FileExistsError, OSError):
+                write_run_report(self.index, report)
+            raise
+        finally:
+            self.transaction = None
 
     def _apply_scan_stats(self, outcome: ScanOutcome) -> None:
         self.stats.scan_generation = self.state.scan.scan_generation

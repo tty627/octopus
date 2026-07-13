@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from octopus import __version__
 from octopus.cli import app
+from octopus.engine import UpdateEngine
+from octopus.providers import HeuristicProvider
 
 runner = CliRunner()
 
@@ -20,7 +23,7 @@ def test_cli_version_and_repository_lifecycle(
 
     version = runner.invoke(app, ["version"])
     assert version.exit_code == 0
-    assert "0.1.0" in version.stdout
+    assert __version__ in version.stdout
 
     initialized = runner.invoke(
         app,
@@ -45,3 +48,51 @@ def test_cli_version_and_repository_lifecycle(
     shown = runner.invoke(app, ["repo", "show"])
     assert shown.exit_code == 0
     assert "CLI Repository" in shown.stdout
+
+    doctor = runner.invoke(app, ["doctor", "--format", "json"])
+    assert doctor.exit_code == 0
+    assert '"check": "Python 3.12+"' in doctor.stdout
+
+    (raw / "notes.txt").write_text("Octopus 诊断测试", encoding="utf-8")
+    dry_run = runner.invoke(
+        app,
+        ["update", "--repository", str(index), "--dry-run", "--format", "json"],
+    )
+    assert dry_run.exit_code == 0, dry_run.stdout
+    assert '"text_updates"' in dry_run.stdout
+
+    UpdateEngine(index).run(force_path="*")
+    validated = runner.invoke(app, ["validate", "--repository", str(index), "--format", "json"])
+    assert validated.exit_code == 0, validated.stdout
+    last_report = runner.invoke(
+        app, ["report", "--repository", str(index), "--last", "--format", "json"]
+    )
+    assert last_report.exit_code == 0
+    assert f'"version": "{__version__}"' in last_report.stdout
+
+    normal_search = runner.invoke(
+        app,
+        ["search", "CLI Repository", "--repository", str(index), "--format", "json"],
+    )
+    assert normal_search.exit_code == 0
+    assert normal_search.stdout.lstrip().startswith("[")
+
+    monkeypatch.setattr(
+        "octopus.search.create_provider", lambda config, require_network: HeuristicProvider()
+    )
+    full_search = runner.invoke(
+        app,
+        [
+            "search",
+            "CLI Repository",
+            "--repository",
+            str(index),
+            "--full",
+            "--format",
+            "report-json",
+        ],
+    )
+    assert full_search.exit_code == 0, full_search.stdout
+    assert '"answer"' in full_search.stdout
+    assert '"results"' in full_search.stdout
+    assert '"citations"' in full_search.stdout

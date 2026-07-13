@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "octopus-index"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local-first, link-centric file indexing CLI"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,6 +21,9 @@ dependencies = [
   "Pillow>=11,<13",
   "rapidocr>=3.0,<4",
   "onnxruntime>=1.20,<2",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "pywin32>=310,<312; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -29,10 +32,15 @@ dev = [
   "pytest-cov>=6,<8",
   "ruff>=0.9,<1",
   "mypy>=1.14,<2",
+  "httpx2>=2,<3",
+  "types-pywin32>=311,<312; sys_platform == 'win32'",
 ]
 
 [project.scripts]
 octopus = "octopus.cli:app"
+
+[tool.hatch.version]
+path = "src/octopus/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/octopus"]
@@ -49,8 +57,9 @@ omit = [
   "*/octopus/cli.py",
   "*/octopus/markmap.py",
   "*/octopus/parsers.py",
-  "*/octopus/providers.py",
+  "*/octopus/service_control.py",
   "*/octopus/watcher.py",
+  "*/octopus/windows_service.py",
 ]
 
 [tool.coverage.report]

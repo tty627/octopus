@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ class RepositoryBusyError(RuntimeError):
 def pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
 

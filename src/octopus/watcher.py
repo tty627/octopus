@@ -43,7 +43,7 @@ def start_watch(index_repository: Path) -> dict[str, object]:
     directory.mkdir(parents=True, exist_ok=True)
     log_stream = (directory / "watch.log").open("a", encoding="utf-8")
     creationflags = 0
-    if os.name == "nt":
+    if sys.platform == "win32":
         creationflags = (
             subprocess.CREATE_NEW_PROCESS_GROUP
             | subprocess.DETACHED_PROCESS
