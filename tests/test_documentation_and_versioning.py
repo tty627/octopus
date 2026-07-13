@@ -115,6 +115,9 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert "-ExpectedVersion $expectedVersion" in workflow
     assert 'releaseArguments += "--prerelease"' in workflow
     assert "validate_windows_install.ps1" in workflow
+    assert "name: Validate signing configuration" in workflow
+    assert "Code-signing environment is incomplete" in workflow
+    assert "SIGNING_TIMESTAMP_URL must be an absolute HTTPS URL" in workflow
     assert "VersionInfoVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductTextVersion={#AppVersion}" in installer

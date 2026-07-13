@@ -51,3 +51,25 @@ uninstall, repository rediscovery after reinstall, and preservation of APPDATA, 
 `-RequireSignature` additionally requires valid Authenticode and RFC 3161 timestamps on the
 installer, installed executables and generated uninstaller. Defender and interactive usability
 remain separate acceptance steps; use `-RunDefender` only on a machine with Microsoft Defender.
+
+## Protected code-signing environment
+
+Signed tag builds use the GitHub environment named `code-signing`. Configure these values in
+**Settings → Environments → code-signing** before creating a release tag:
+
+- environment secret `SIGNING_PFX_BASE64`: Base64 encoding of the complete PFX file;
+- environment secret `SIGNING_PFX_PASSWORD`: the PFX password;
+- environment variable `SIGNING_TIMESTAMP_URL`: an absolute HTTPS RFC 3161 endpoint.
+
+Never commit the PFX, its password, or an encoded copy. The signed-release job checks that all
+three values exist, that the certificate value is valid non-empty Base64, and that the timestamp
+endpoint is HTTPS before checking out source or building artifacts. Names can be verified without
+revealing values:
+
+```powershell
+gh secret list --env code-signing
+gh variable list --env code-signing
+```
+
+Do not create an Alpha, RC, or final tag until this preflight and the matching release checklist
+are ready; a tag is the publication trigger.
