@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .config import load_global_config
 from .models import utc_now
@@ -162,7 +162,7 @@ def main() -> None:
         servicemanager.PrepareToHostSingle(OctopusWindowsService)
         servicemanager.StartServiceCtrlDispatcher()  # type: ignore[no-untyped-call]
     else:
-        win32serviceutil.HandleCommandLine(OctopusWindowsService)
+        win32serviceutil.HandleCommandLine(cast(Any, OctopusWindowsService))
 
 
 if __name__ == "__main__":

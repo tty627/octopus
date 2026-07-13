@@ -34,7 +34,7 @@ dev = [
   "ruff>=0.9,<1",
   "mypy>=1.14,<2",
   "httpx2>=2,<3",
-  "types-pywin32>=311,<312; sys_platform == 'win32'",
+  "types-pywin32>=311,<312",
 ]
 build = [
   "build>=1.2,<2",

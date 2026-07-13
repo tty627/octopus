@@ -18,7 +18,7 @@ from octopus.config import (
     repository_state_path,
 )
 from octopus.engine import UpdateEngine
-from octopus.gui import format_bytes, suggest_index_path
+from octopus.gui import _open_path, format_bytes, suggest_index_path
 from octopus.models import UpdatePhase, UpdateProgress
 from octopus.onboarding import (
     OnboardingErrorCode,
@@ -187,6 +187,22 @@ def test_gui_path_and_size_helpers(tmp_path: Path) -> None:
     (tmp_path / "资料-Octopus-Index").mkdir()
     assert suggest_index_path(raw) == tmp_path / "资料-Octopus-Index-2"
     assert format_bytes(2 * 1024**3) == "2.0 GiB"
+
+
+def test_gui_path_opener_is_platform_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[Path] = []
+    monkeypatch.setattr("octopus.gui.sys.platform", "win32")
+    monkeypatch.setattr(
+        "octopus.gui.os.startfile", lambda path: opened.append(Path(path)), raising=False
+    )
+    _open_path(tmp_path)
+    assert opened == [tmp_path]
+
+    monkeypatch.setattr("octopus.gui.sys.platform", "linux")
+    with pytest.raises(RuntimeError, match="only on Windows"):
+        _open_path(tmp_path)
 
 
 def test_repository_creation_can_disable_ai_and_rolls_back_local_files(
