@@ -19,9 +19,11 @@ function Assert-NativeSuccess {
     }
 }
 
-if (-not (Test-Path -LiteralPath $Python)) {
+$PythonCommand = Get-Command $Python -CommandType Application -ErrorAction SilentlyContinue
+if (-not $PythonCommand) {
     throw "Python executable not found: $Python"
 }
+$Python = $PythonCommand.Source
 
 $Version = (& $Python -c "from octopus import __version__; print(__version__)").Trim()
 Assert-NativeSuccess "Read product version"
