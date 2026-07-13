@@ -65,7 +65,9 @@ def test_end_to_end_index_is_read_only_and_bottom_up(repository: tuple[Path, Pat
     assert not report.errors
     validation = validate_repository(index)
     assert validation.error_count == 0
-    assert validation.search_documents == validation.markdown_indexes
+    assert validation.search_index_documents == validation.markdown_indexes
+    assert validation.search_text_documents == 1
+    assert validation.search_documents == validation.markdown_indexes + 1
 
 
 def test_dry_run_is_strictly_read_only(repository: tuple[Path, Path, object]) -> None:

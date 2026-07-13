@@ -99,6 +99,23 @@ def test_cli_version_and_repository_lifecycle(
     assert normal_search.exit_code == 0
     assert normal_search.stdout.lstrip().startswith("[")
 
+    local_report = runner.invoke(
+        app,
+        [
+            "search",
+            "CLI Repository",
+            "--repository",
+            str(index),
+            "--mode",
+            "local",
+            "--format",
+            "report-json",
+        ],
+    )
+    assert local_report.exit_code == 0, local_report.stdout
+    assert '"requested_mode": "local"' in local_report.stdout
+    assert '"search_algorithm_version"' in local_report.stdout
+
     monkeypatch.setattr(
         "octopus.search.create_provider", lambda config, require_network: HeuristicProvider()
     )

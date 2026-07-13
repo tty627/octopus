@@ -12,8 +12,8 @@ from octopus.config import (
     repository_state_path,
 )
 from octopus.engine import UpdateEngine
-from octopus.gui import format_bytes, suggest_index_path
-from octopus.models import UpdatePhase, UpdateProgress
+from octopus.gui import format_bytes, result_detail_text, suggest_index_path
+from octopus.models import ExtractionEvidence, SearchResult, UpdatePhase, UpdateProgress
 from octopus.onboarding import (
     OnboardingErrorCode,
     classify_onboarding_error,
@@ -257,3 +257,24 @@ def test_commit_phase_is_noncancellable_and_progress_is_monotonic(
 )
 def test_onboarding_errors_are_stable(error: Exception, expected: OnboardingErrorCode) -> None:
     assert classify_onboarding_error(error) == expected
+
+
+def test_gui_result_detail_exposes_reason_evidence_and_risk(tmp_path: Path) -> None:
+    result = SearchResult(
+        node_id="text-1",
+        index_type="text",
+        index_path=str(tmp_path / "folder.md"),
+        name="notes.txt",
+        summary="Budget notes",
+        description="",
+        status="stale",
+        explanation="文件名包含查询词",
+        risk_flags=["status:stale"],
+        evidence=[
+            ExtractionEvidence(locator="line:1", kind="text", text_excerpt="Budget notes")
+        ],
+    )
+    detail = result_detail_text(result)
+    assert "文件名包含查询词" in detail
+    assert "line:1" in detail
+    assert "status:stale" in detail

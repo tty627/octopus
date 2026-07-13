@@ -360,8 +360,9 @@ class AIUsage(OctopusModel):
 
 class SearchDocument(OctopusModel):
     node_id: str
-    index_type: Literal["leaf", "foldernode"]
+    index_type: Literal["text", "leaf", "foldernode"]
     index_path: str
+    raw_relative_path: str = ""
     name: str
     summary: str
     description: str
@@ -370,22 +371,31 @@ class SearchDocument(OctopusModel):
     body_excerpt: str = ""
     status: str = "clean"
     source_uri: str = ""
+    evidence: list[ExtractionEvidence] = Field(default_factory=list)
+    quality_flags: list[str] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class SearchResult(SearchDocument):
+    rank: int = Field(default=0, ge=0)
     score: float = 0.0
     matched_terms: list[str] = Field(default_factory=list)
+    matched_fields: list[str] = Field(default_factory=list)
     match_reasons: list[str] = Field(default_factory=list)
+    explanation: str = ""
+    risk_flags: list[str] = Field(default_factory=list)
+    recommended_open_target: Literal["index", "source"] = "index"
 
 
 class SearchCitation(OctopusModel):
     citation_id: str
     node_id: str
     name: str
-    index_type: Literal["leaf", "foldernode"]
+    index_type: Literal["text", "leaf", "foldernode"]
     index_path: str
     status: str = "clean"
     summary: str = ""
+    evidence: list[ExtractionEvidence] = Field(default_factory=list)
 
 
 class GeneratedSearchAnswer(OctopusModel):
@@ -396,10 +406,17 @@ class GeneratedSearchAnswer(OctopusModel):
 
 
 class SearchReport(OctopusModel):
+    report_schema_version: str = "1.0"
+    search_algorithm_version: str = ""
     query: str
+    requested_mode: Literal["local", "auto"] = "local"
+    actual_mode: Literal["local", "ai", "degraded"] = "local"
+    degradation_reason: str = ""
     answer: GeneratedSearchAnswer
     results: list[SearchResult]
     citations: list[SearchCitation] = Field(default_factory=list)
+    candidate_count: int = 0
+    duration_ms: int = Field(default=0, ge=0)
     ai_usage: AIUsage = Field(default_factory=AIUsage)
 
 
@@ -501,6 +518,8 @@ class ValidationReport(OctopusModel):
     markdown_indexes: int = 0
     manifest_nodes: int = 0
     search_documents: int = 0
+    search_index_documents: int = 0
+    search_text_documents: int = 0
 
     @computed_field  # type: ignore[prop-decorator]
     @property

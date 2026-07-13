@@ -35,6 +35,17 @@ The `v1.0.1` under `docs/specs/` is a specification revision, not a software rel
 The signed installer and `0.4.0` release remain gated on protected-CI signing, clean Windows 11 VM
 validation and the alpha/RC user acceptance cohorts in the [v0.4 plan](docs/releases/v0.4.md).
 
+## v0.5 engineering work
+
+The current feature branch develops v0.5 search value without changing the product version or
+claiming release completion. Local, AI-assisted and degraded searches share a versioned report;
+plain-text files are independent results with reasons, evidence, risks and a recommended open
+target. SQLite refresh is incremental and bound to the committed Manifest generation.
+
+The public `octopus-retrieval-v1` suite contains 60 balanced Chinese/English tasks. The current
+Windows development run reaches 55/60 Hit@5 (91.7%); the Python 3.12 reference-machine run and independent 20-person
+location-time study remain required by the [v0.5 plan](docs/releases/v0.5.md).
+
 ## Core capabilities inherited from v0.3
 
 - Strict Raw/Index separation and a guarded read-only Raw access layer.
@@ -63,7 +74,8 @@ Source/development installations require:
 
 - Python 3.12+
 - Node.js with `npx` only when HTML Markmap rendering is needed
-- A `DEEPSEEK_API_KEY` for AI summaries and `search --full`
+- A `DEEPSEEK_API_KEY` only for AI summaries and optional `search --mode auto`; local search and
+  automatic degradation require no key
 
 ## Install for development
 
@@ -97,12 +109,16 @@ octopus update --dry-run --format json
 octopus validate --format json
 octopus report --last --format markdown
 octopus search "项目需求"
+octopus search --mode auto "找到最重要的项目需求和相关材料" --format report-json
 octopus search --full "找到最重要的项目需求和相关材料" --format report-json
 octopus search --full "找到最重要的项目需求和相关材料" --markmap result.html
 octopus watch start
 octopus watch status
 octopus watch stop
 octopus upgrade check --format json
+octopus evaluate retrieval --tasks benchmarks/retrieval/v1/tasks.jsonl --judgments benchmarks/retrieval/v1/judgments.jsonl --enforce
+octopus evaluate study --tasks benchmarks/retrieval/v1/tasks.jsonl --output study.jsonl
+octopus evaluate summarize --records study.jsonl --output study-summary.json
 ```
 
 The first automatic observation may leave recently changed files in `pending_stable`. Explicit

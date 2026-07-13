@@ -373,6 +373,12 @@ class RepositoryScanner:
                 ancestor_foldernode_ids=ancestor_ids,
                 dirty_reason=record.dependency.dirty_reason,
             )
+
+        for path, record in records_by_path.items():
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            if path.startswith("__orphaned__/"):
+                continue
             record.child_node_ids = [
                 candidate.node_id
                 for candidate_path, candidate in records_by_path.items()
@@ -384,6 +390,7 @@ class RepositoryScanner:
             for path, record in records_by_path.items()
             if not path.startswith("__orphaned__/") and record.node_kind == "raw_folder"
         ]
+        folder_records.sort(key=lambda item: len(Path(item[0]).parts), reverse=True)
         for path, folder in folder_records:
             if cancellation_token:
                 cancellation_token.raise_if_cancelled()
@@ -399,16 +406,34 @@ class RepositoryScanner:
             )
             for child in children:
                 digest.update(child.raw_relative_path.encode("utf-8"))
-                digest.update(child.fingerprint.quick_hash.encode("ascii"))
+                child_snapshot = (
+                    child.fingerprint.content_hash or child.fingerprint.quick_hash
+                )
+                digest.update(child_snapshot.encode("ascii"))
+                status = (
+                    "available"
+                    if child.state
+                    in {
+                        NodeState.clean,
+                        NodeState.dirty,
+                        NodeState.queued,
+                        NodeState.moved,
+                        NodeState.indexing,
+                        NodeState.indexed,
+                    }
+                    else child.state.value
+                )
+                digest.update(status.encode("utf-8"))
             snapshot = digest.hexdigest()
             old = old_by_path.get(path)
             if old and old.fingerprint.content_hash == snapshot and folder.state != NodeState.dirty:
                 folder.state = NodeState.clean
             else:
                 folder.state = NodeState.dirty
-                folder.dependency.dirty_reason = "child_set_changed"
+                folder.dependency.dirty_reason = "child_content_or_status_changed"
             folder.fingerprint.content_hash = snapshot
-            state.queues.foldernode_mechanical_update.append(folder.node_id)
+            if folder.state == NodeState.dirty or not folder.index_relative_path:
+                state.queues.foldernode_mechanical_update.append(folder.node_id)
 
         state.nodes = {record.node_id: record for record in records_by_path.values()}
         state.dependencies = {

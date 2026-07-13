@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -67,6 +68,10 @@ class UpdateStats:
     pending: int = 0
     leaf_updated: int = 0
     foldernode_updated: int = 0
+    search_refresh_mode: str = "none"
+    search_documents_upserted: int = 0
+    search_documents_deleted: int = 0
+    search_refresh_ms: int = 0
     failed: int = 0
     ai_provider: str = "heuristic"
 
@@ -273,9 +278,14 @@ class UpdateEngine:
             if header.get("schema", {}).get("index_type") != "leaf":
                 return
             control = header.setdefault("update_control", {})
-            control["index_status"] = node.state.value
-            control["last_seen_at"] = node.stability.last_seen_at
-            control["pending_reason"] = node.pending_reason
+            values = {
+                "index_status": node.state.value,
+                "last_seen_at": node.stability.last_seen_at,
+                "pending_reason": node.pending_reason,
+            }
+            if all(control.get(key, "") == value for key, value in values.items()):
+                return
+            control.update(values)
             text = json.dumps(header, ensure_ascii=False, indent=2) + "\n\n" + body
             validate_index_text(text, "leaf")
             self._stage_text(path, text)
@@ -299,6 +309,7 @@ class UpdateEngine:
             "size_bytes": child.fingerprint.size_bytes,
             "quality_flags": [],
             "source_link_available": source.exists(),
+            "source_uri": source.resolve().as_uri() if source.exists() else "",
             "open_recommendation": "medium",
             "index_link": "",
         }
@@ -311,9 +322,15 @@ class UpdateEngine:
                 summary = self.heuristic.generate_leaf(document)
                 common.update(
                     one_sentence_summary=summary.one_sentence_summary,
+                    description=summary.description,
                     document_or_folder_type=document.document_type,
                     tag_rough=summary.tag_rough,
                     topic_keywords=summary.topic_keywords,
+                    extraction_evidence=[
+                        item.model_dump(mode="json", exclude_none=True)
+                        for item in document.evidence
+                    ],
+                    truncated=document.truncated,
                 )
             except (OSError, UnicodeError) as error:
                 common.update(
@@ -338,11 +355,18 @@ class UpdateEngine:
                     layer = header.get("summary_layer", {})
                     common.update(
                         one_sentence_summary=layer.get("one_sentence_summary", ""),
+                        description=layer.get("description", ""),
                         document_or_folder_type=layer.get("document_type")
                         or layer.get("folder_type", ""),
                         tag_rough=layer.get("tag_rough", []),
                         topic_keywords=layer.get("topic_keywords", []),
                         quality_flags=layer.get("quality_flags", []),
+                        extraction_evidence=header.get("attachment_card_layer", {}).get(
+                            "extraction_evidence", []
+                        ),
+                        truncated=header.get("extraction_policy", {}).get(
+                            "truncated", False
+                        ),
                     )
                     return common
                 except (OSError, ValueError, json.JSONDecodeError):
@@ -665,7 +689,13 @@ class UpdateEngine:
                         folder_nodes = [
                             node
                             for node in self.state.nodes.values()
-                            if node.node_kind == "raw_folder" and node.state != NodeState.orphaned
+                            if node.node_kind == "raw_folder"
+                            and node.state != NodeState.orphaned
+                            and (
+                                foldernode_only
+                                or node.state == NodeState.dirty
+                                or not node.index_relative_path
+                            )
                         ]
                         folder_nodes.sort(
                             key=lambda item: len(Path(item.raw_relative_path).parts),
@@ -720,7 +750,28 @@ class UpdateEngine:
                     try:
                         from .search import SearchIndex
 
-                        SearchIndex(self.index).rebuild()
+                        started_refresh = time.perf_counter()
+                        changed_paths: list[Path] = []
+                        deleted_paths: list[Path] = []
+                        for operation in transaction.record.operations:
+                            if operation.is_manifest or not operation.relative_path.endswith(".md"):
+                                continue
+                            target = self.index / Path(operation.relative_path)
+                            if operation.action == "write":
+                                changed_paths.append(target)
+                            else:
+                                deleted_paths.append(target)
+                        refresh = SearchIndex(self.index).refresh(
+                            changed_paths,
+                            deleted_paths,
+                            manifest_generation=str(self.state.scan.scan_generation),
+                        )
+                        self.stats.search_refresh_mode = str(refresh["mode"])
+                        self.stats.search_documents_upserted = int(refresh["upserted"])
+                        self.stats.search_documents_deleted = int(refresh["deleted"])
+                        self.stats.search_refresh_ms = max(
+                            0, int((time.perf_counter() - started_refresh) * 1_000)
+                        )
                     except Exception as error:
                         derived_ok = False
                         self.logger.event("search_rebuild_failed", error=str(error)[:1000])

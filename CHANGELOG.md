@@ -6,6 +6,8 @@
 
 ### Added
 
+- v0.5 工程先行的统一可解释 `SearchReport`、纯文本文件结果、证据/风险与推荐打开目标。
+- 版本化 60 任务中英检索集、Top-5/MRR 评测器及匿名反平衡用户研究记录/汇总工具。
 - 简体中文 Tkinter 首次运行向导、六格式确定性示例资料和前五条本地搜索结果。
 - 只读 `RepositoryEstimate` 预检、版本化 Windows 时间/空间系数和稳定错误码。
 - `UpdateProgress`、线程安全 `CancellationToken`、提交前事务回滚及 cancelled RunReport。
@@ -15,6 +17,7 @@
 
 ### Changed
 
+- 搜索缓存按提交事务增量刷新并绑定 Manifest generation；AI 不可用或无有效证据时自动降级到本地结果。
 - 向导创建的仓库默认关闭 AI，首次流程固定为 0 次 AI 调用。
 - 仓库初始化先持久化本地配置/状态，再注册全局配置；失败仅清理本次 Octopus 文件。
 - watcher/API 子进程命令在冻结环境中复用当前 CLI 可执行文件。

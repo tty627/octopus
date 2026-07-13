@@ -74,6 +74,18 @@ def format_bytes(value: int) -> str:
     return f"{value / 1024**2:.1f} MiB"
 
 
+def result_detail_text(result: SearchResult) -> str:
+    evidence = "；".join(
+        f"{item.locator}：{item.text_excerpt or item.kind}" for item in result.evidence[:3]
+    )
+    risks = "、".join(result.risk_flags) or "无已知风险"
+    return (
+        f"推荐原因：{result.explanation or '来自相关索引'}\n"
+        f"证据定位：{evidence or '暂无内部定位'}\n"
+        f"状态：{result.status}；风险：{risks}"
+    )
+
+
 class OctopusWizard:
     def __init__(self, root: Tk) -> None:
         self.root = root
@@ -91,6 +103,7 @@ class OctopusWizard:
         self.index_value = StringVar(value=str(sample_index))
         self.status = StringVar(value="选择示例资料或自己的资料目录。")
         self.query = StringVar(value=SAMPLE_SEARCH_TASKS[0])
+        self.result_detail = StringVar(value="选择结果后可查看推荐原因和证据定位。")
         self.upgrade_message = StringVar(value="")
         self.upgrade_result: UpgradeCheckResult | None = None
         self.release_button: ttk.Button | None = None
@@ -457,12 +470,22 @@ class OctopusWizard:
         search_row.pack(fill="x")
         ttk.Entry(search_row, textvariable=self.query).pack(side=LEFT, fill="x", expand=True)
         ttk.Button(search_row, text="搜索", command=self._search).pack(side=RIGHT, padx=(8, 0))
-        self.result_list = Listbox(frame, height=12)
-        self.result_list.pack(fill=BOTH, expand=True, pady=14)
+        self.result_list = Listbox(frame, height=8)
+        self.result_list.pack(fill=BOTH, expand=True, pady=(14, 8))
+        self.result_list.bind("<<ListboxSelect>>", self._show_result_detail)
+        ttk.Label(
+            frame,
+            textvariable=self.result_detail,
+            wraplength=680,
+            justify=LEFT,
+        ).pack(fill="x", pady=(0, 12))
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="打开索引结果", command=self._open_index).pack(side=LEFT)
-        ttk.Button(buttons, text="打开原文件", command=self._open_source).pack(side=LEFT, padx=8)
+        ttk.Button(buttons, text="打开推荐结果", command=self._open_recommended).pack(side=LEFT)
+        ttk.Button(buttons, text="打开索引结果", command=self._open_index).pack(
+            side=LEFT, padx=8
+        )
+        ttk.Button(buttons, text="打开原文件", command=self._open_source).pack(side=LEFT)
         ttk.Button(buttons, text="打开索引目录", command=self._open_index_directory).pack(
             side=RIGHT
         )
@@ -474,12 +497,22 @@ class OctopusWizard:
         query = self.query.get().strip()
         if not query:
             return
-        self.results = SearchIndex(self.index_path).search(query, limit=5)
+        self.results = SearchIndex(self.index_path).search_report(
+            query, limit=5, mode="local"
+        ).results
         self.result_list.delete(0, END)
         for result in self.results:
             self.result_list.insert(END, f"{result.name} — {result.summary}")
         if self.results:
             self.result_list.selection_set(0)
+            self._show_result_detail()
+        else:
+            self.result_detail.set("未找到匹配结果。")
+
+    def _show_result_detail(self, _event: object | None = None) -> None:
+        result = self._selected()
+        if result:
+            self.result_detail.set(result_detail_text(result))
 
     def _selected(self) -> SearchResult | None:
         selection = self.result_list.curselection()  # type: ignore[no-untyped-call]
@@ -492,6 +525,16 @@ class OctopusWizard:
         if result:
             os.startfile(result.index_path)
             self._record_result_opened()
+
+    def _open_recommended(self) -> None:
+        result = self._selected()
+        if not result:
+            return
+        if result.recommended_open_target == "source" and result.source_uri:
+            webbrowser.open(result.source_uri)
+        else:
+            os.startfile(result.index_path)
+        self._record_result_opened()
 
     def _open_source(self) -> None:
         result = self._selected()

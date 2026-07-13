@@ -12,6 +12,7 @@ Run release gates without network AI calls:
 ```powershell
 python -m benchmarks.benchmark_transactions --counts 400 800 --repeats 5 --warmups 1 --enforce
 python -m benchmarks.benchmark_incremental --repeats 5 --warmups 1 --enforce
+python -m benchmarks.benchmark_retrieval --enforce
 ```
 
 Use `--output .octopus-dev\benchmarks\<name>.json` to preserve machine-readable results. Record
@@ -27,3 +28,7 @@ python -m benchmarks.benchmark_estimates --repeats 7 --output .octopus-dev\bench
 The output records the coefficient version, OS, Python, processor, per-format P50/P95 parser time
 and extracted/source size ratio. Update the conservative envelope in `octopus.onboarding` only
 after reviewing this result; increment `ESTIMATE_COEFFICIENT_VERSION` whenever values change.
+
+The retrieval gate materializes the public `octopus-retrieval-v1` corpus in a temporary directory,
+indexes it with AI disabled and evaluates 60 blind judgments. Its report includes product,
+algorithm and dataset versions plus per-task ranks, Hit@1/5 and MRR.

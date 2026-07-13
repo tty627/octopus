@@ -59,6 +59,7 @@ def run_incremental_benchmark(repeats: int = 5, warmups: int = 1) -> dict[str, o
         "p95_ms": p95,
         "measurements_ms": timings,
         "passes_v03_gate": p95 <= 30_000,
+        "passes_v05_gate": p95 <= 30_000,
     }
 
 

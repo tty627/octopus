@@ -69,7 +69,22 @@ def test_local_api_auth_repository_search_and_jobs(
             json={"query": "local API"},
         )
         assert search.status_code == 200
-        assert search.json()
+        assert search.json()["requested_mode"] == "local"
+        assert search.json()["actual_mode"] == "local"
+        assert search.json()["results"]
+        legacy_auto = client.post(
+            f"/v1/repositories/{repository_id}/search",
+            headers=headers,
+            json={"query": "local API", "full": True},
+        )
+        assert legacy_auto.status_code == 200
+        assert legacy_auto.json()["requested_mode"] == "auto"
+        conflicting = client.post(
+            f"/v1/repositories/{repository_id}/search",
+            headers=headers,
+            json={"query": "local API", "mode": "local", "full": False},
+        )
+        assert conflicting.status_code == 422
         validation = client.post(f"/v1/repositories/{repository_id}/validate", headers=headers)
         assert validation.status_code == 200
         assert validation.json()["error_count"] == 0
