@@ -1,8 +1,8 @@
 #ifndef AppVersion
-  #define AppVersion "0.4.0.dev0"
+  #define AppVersion "0.4.0a1"
 #endif
 #ifndef AppNumericVersion
-  #define AppNumericVersion "0.4.0.0"
+  #define AppNumericVersion "0.4.0.1001"
 #endif
 
 [Setup]

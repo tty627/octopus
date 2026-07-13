@@ -5,8 +5,8 @@ without modifying it, writes compact Markdown Leaf and FolderNode indexes to a s
 Repository, and lets people or agents search those indexes without repeatedly opening non-text
 originals.
 
-The current released version is `0.3.0`; active development is `0.4.0.dev0` on the `v0.4`
-branch. v0.1 and v0.2 are internal milestones and have no formal Git release tags.
+The current released version is `0.3.0`; the v0.4 release line is preparing the controlled
+`0.4.0a1` candidate. v0.1 and v0.2 are internal milestones and have no formal Git release tags.
 
 ## Product and release documentation
 
@@ -21,7 +21,7 @@ branch. v0.1 and v0.2 are internal milestones and have no formal Git release tag
 
 The `v1.0.1` under `docs/specs/` is a specification revision, not a software release version.
 
-## v0.4 development capabilities
+## v0.4 candidate capabilities
 
 - Simplified-Chinese Tkinter first-run wizard with a deterministic six-format sample repository.
 - Read-only file, format, time, disk and AI-call preflight; wizard repositories always start with
