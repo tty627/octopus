@@ -24,6 +24,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
   "pywin32>=310,<312; sys_platform == 'win32'",
+  "packaging>=24,<27",
 ]
 
 [project.optional-dependencies]
@@ -35,9 +36,16 @@ dev = [
   "httpx2>=2,<3",
   "types-pywin32>=311,<312; sys_platform == 'win32'",
 ]
+build = [
+  "build>=1.2,<2",
+  "pyinstaller==6.21.0",
+]
 
 [project.scripts]
 octopus = "octopus.cli:app"
+
+[project.gui-scripts]
+octopus-gui = "octopus.gui:main"
 
 [tool.hatch.version]
 path = "src/octopus/__init__.py"
@@ -55,6 +63,7 @@ source = ["octopus"]
 omit = [
   "*/octopus/__main__.py",
   "*/octopus/cli.py",
+  "*/octopus/gui.py",
   "*/octopus/markmap.py",
   "*/octopus/parsers.py",
   "*/octopus/service_control.py",

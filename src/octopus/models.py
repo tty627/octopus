@@ -38,6 +38,27 @@ class NodeState(StrEnum):
     orphaned = "orphaned"
 
 
+class UpdatePhase(StrEnum):
+    preparing = "preparing"
+    scanning = "scanning"
+    leaf = "leaf"
+    foldernode = "foldernode"
+    committing = "committing"
+    search_rebuild = "search_rebuild"
+    complete = "complete"
+    cancelled = "cancelled"
+    failed = "failed"
+
+
+class UpdateProgress(OctopusModel):
+    phase: UpdatePhase
+    completed: int = Field(default=0, ge=0)
+    total: int = Field(default=0, ge=0)
+    current_path: str = ""
+    percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    cancellable: bool = True
+
+
 class SchemaInfo(OctopusModel):
     octopus_schema: str = "0.2"
     config_type: str | None = None
@@ -418,7 +439,7 @@ class RunReport(OctopusModel):
     started_at: str
     finished_at: str
     duration_ms: int = 0
-    status: Literal["success", "partial", "failed", "dry_run"]
+    status: Literal["success", "partial", "failed", "dry_run", "cancelled"]
     stats: dict[str, Any] = Field(default_factory=dict)
     ai_usage: AIUsage = Field(default_factory=AIUsage)
     errors: list[dict[str, str]] = Field(default_factory=list)
@@ -439,6 +460,26 @@ class DryRunPlan(OctopusModel):
     text_updates: list[str] = Field(default_factory=list)
     foldernode_updates: list[str] = Field(default_factory=list)
     estimated_ai_calls: int = 0
+
+
+class RepositoryEstimate(OctopusModel):
+    raw_path: str
+    index_path: str
+    file_count: int = 0
+    directory_count: int = 0
+    supported_file_count: int = 0
+    unsupported_file_count: int = 0
+    format_counts: dict[str, int] = Field(default_factory=dict)
+    total_source_bytes: int = 0
+    estimated_index_bytes: int = 0
+    required_free_bytes: int = 0
+    available_free_bytes: int = 0
+    estimated_seconds_p50: float = 0.0
+    estimated_seconds_p95: float = 0.0
+    estimated_ai_calls: int = 0
+    coefficient_version: str = ""
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ValidationSeverity(StrEnum):

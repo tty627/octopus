@@ -54,8 +54,22 @@ def validate_repository_paths(raw: Path, index: Path) -> tuple[Path, Path]:
     return raw, index
 
 
-def create_repository(raw: Path, index: Path, name: str | None = None) -> RepositoryConfig:
+def create_repository(
+    raw: Path,
+    index: Path,
+    name: str | None = None,
+    *,
+    ai_enabled: bool | None = None,
+    require_empty: bool = False,
+) -> RepositoryConfig:
     raw, index = validate_repository_paths(raw, index)
+    index_existed = index.exists()
+    if index_existed and not index.is_dir():
+        raise ValueError(f"Index Repository is not a directory: {index}")
+    if require_empty and index_existed and any(index.iterdir()):
+        raise ValueError(f"Index Repository must be empty: {index}")
+    if repository_config_path(index).exists() or repository_state_path(index).exists():
+        raise ValueError(f"Index Repository is already an Octopus repository: {index}")
     index.mkdir(parents=True, exist_ok=True)
     repo_id = str(uuid.uuid4())
     config = RepositoryConfig(
@@ -66,6 +80,8 @@ def create_repository(raw: Path, index: Path, name: str | None = None) -> Reposi
             repository_name=name or raw.name or "Octopus Repository",
         )
     )
+    if ai_enabled is not None:
+        config.ai_policy.enabled = ai_enabled
     state = RepositoryState(
         repository=ManifestRepository(
             raw_repo_id=repo_id,
@@ -73,16 +89,30 @@ def create_repository(raw: Path, index: Path, name: str | None = None) -> Reposi
             index_repository_path_snapshot=str(index),
         )
     )
-    atomic_write_json(repository_config_path(index), config.model_dump(mode="json", by_alias=True))
-    atomic_write_json(repository_state_path(index), state.model_dump(mode="json", by_alias=True))
-    global_config = load_global_config()
-    global_config.repositories[repo_id] = GlobalRepository(
-        raw_repo_id=repo_id,
-        name=config.repository.repository_name,
-        index_repository_path=str(index),
-    )
-    global_config.active_repository_id = repo_id
-    save_global_config(global_config)
+    config_path = repository_config_path(index)
+    state_path = repository_state_path(index)
+    try:
+        atomic_write_json(config_path, config.model_dump(mode="json", by_alias=True))
+        atomic_write_json(state_path, state.model_dump(mode="json", by_alias=True))
+        global_config = load_global_config()
+        global_config.repositories[repo_id] = GlobalRepository(
+            raw_repo_id=repo_id,
+            name=config.repository.repository_name,
+            index_repository_path=str(index),
+        )
+        global_config.active_repository_id = repo_id
+        save_global_config(global_config)
+    except Exception:
+        config_path.unlink(missing_ok=True)
+        state_path.unlink(missing_ok=True)
+        octopus = octopus_dir(index)
+        try:
+            octopus.rmdir()
+            if not index_existed:
+                index.rmdir()
+        except OSError:
+            pass
+        raise
     return config
 
 

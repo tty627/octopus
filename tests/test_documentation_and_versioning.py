@@ -67,7 +67,7 @@ def test_product_version_has_one_source_and_schema_versions_remain_independent()
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["dynamic"] == ["version"]
     assert pyproject["tool"]["hatch"]["version"]["path"] == "src/octopus/__init__.py"
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.4.0.dev0"
     assert IndexingInfo().generator_version == __version__
     assert ExtractedDocument(name="x", document_type="text").parser_version == __version__
     report = RunReport(

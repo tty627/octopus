@@ -17,8 +17,11 @@ from .models import (
     QueueState,
     RepositoryConfig,
     RepositoryState,
+    UpdatePhase,
+    UpdateProgress,
     utc_now,
 )
+from .progress import CancellationToken, ProgressCallback
 from .utils import quick_hash_file
 
 DEFAULT_IGNORED_DIRECTORIES = {
@@ -92,10 +95,17 @@ class RepositoryScanner:
             for pattern in patterns
         )
 
-    def _entries(self, outcome: ScanOutcome) -> dict[str, ScanEntry]:
+    def _entries(
+        self,
+        outcome: ScanOutcome,
+        progress_callback: ProgressCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> dict[str, ScanEntry]:
         entries: dict[str, ScanEntry] = {}
 
         def visit(directory: Path) -> None:
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
             try:
                 children = sorted(os.scandir(directory), key=lambda item: item.name.casefold())
             except (OSError, PermissionError):
@@ -106,6 +116,8 @@ class RepositoryScanner:
                 if item.name.startswith("~$") and len(item.name) > 2
             }
             for child in children:
+                if cancellation_token:
+                    cancellation_token.raise_if_cancelled()
                 path = Path(child.path)
                 relative = path.relative_to(self.raw).as_posix()
                 try:
@@ -139,6 +151,15 @@ class RepositoryScanner:
                 if child.name in lock_targets:
                     signals.append("office_temporary_lock")
                 entries[relative] = ScanEntry(relative, path, is_directory, fingerprint, signals)
+                if progress_callback:
+                    progress_callback(
+                        UpdateProgress(
+                            phase=UpdatePhase.scanning,
+                            completed=len(entries),
+                            current_path=relative,
+                            percent=5.0,
+                        )
+                    )
                 if is_directory:
                     visit(path)
 
@@ -154,16 +175,30 @@ class RepositoryScanner:
             ),
         )
         outcome.discovered = len(entries)
+        if progress_callback:
+            progress_callback(
+                UpdateProgress(
+                    phase=UpdatePhase.scanning,
+                    completed=len(entries),
+                    total=len(entries),
+                    percent=20.0,
+                )
+            )
         return entries
 
     def scan(
-        self, state: RepositoryState, force_path: str | None = None
+        self,
+        state: RepositoryState,
+        force_path: str | None = None,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> tuple[RepositoryState, ScanOutcome]:
         outcome = ScanOutcome()
         state.repository.last_scan_started_at = utc_now()
         state.scan.scan_generation += 1
         state.queues = QueueState()
-        entries = self._entries(outcome)
+        entries = self._entries(outcome, progress_callback, cancellation_token)
         old_by_path = {record.raw_relative_path: record for record in state.nodes.values()}
         now = datetime.now(UTC)
         quiet_threshold = now - timedelta(seconds=self.config.stability.minimum_quiet_seconds)
@@ -172,6 +207,8 @@ class RepositoryScanner:
         new_paths: list[str] = []
 
         for relative, entry in entries.items():
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
             old = old_by_path.get(relative)
             is_directory = entry.is_directory
             unchanged = bool(
@@ -255,7 +292,7 @@ class RepositoryScanner:
                 outcome.modified += 1
                 node.stability.last_unstable_at = utc_now()
                 node.stability.stable_scan_count = 1 if modified_at <= quiet_threshold else 0
-                if forced and modified_at <= quiet_threshold:
+                if forced:
                     node.state = NodeState.queued
                     state.queues.leaf_update.append(node.node_id)
                     outcome.queued += 1
@@ -275,6 +312,8 @@ class RepositoryScanner:
             if path in records_by_path and records_by_path[path].node_kind == "raw_file"
         ]
         for deleted in deleted_records:
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
             matches = [
                 candidate
                 for candidate in new_file_records
@@ -311,6 +350,8 @@ class RepositoryScanner:
             if not path.startswith("__orphaned__/")
         }
         for path, record in records_by_path.items():
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
             if path.startswith("__orphaned__/"):
                 continue
             parent_path = Path(path).parent.as_posix() if path else ""
@@ -344,6 +385,8 @@ class RepositoryScanner:
             if not path.startswith("__orphaned__/") and record.node_kind == "raw_folder"
         ]
         for path, folder in folder_records:
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
             digest = hashlib.sha256()
             children = sorted(
                 (

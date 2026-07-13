@@ -19,6 +19,7 @@ from typing import Any
 from .config import global_config_path, load_global_config
 from .locking import pid_is_alive
 from .models import utc_now
+from .runtime import octopus_command
 from .utils import atomic_write_json
 
 
@@ -149,16 +150,13 @@ def start_api_process(host: str | None = None, port: int | None = None) -> dict[
             | subprocess.CREATE_NO_WINDOW
         )
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "octopus",
+        octopus_command(
             "_api-run",
             "--host",
             bind_host,
             "--port",
             str(bind_port),
-        ],
+        ),
         stdin=subprocess.DEVNULL,
         stdout=log_stream,
         stderr=log_stream,

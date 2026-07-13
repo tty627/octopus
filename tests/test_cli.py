@@ -9,8 +9,30 @@ from octopus import __version__
 from octopus.cli import app
 from octopus.engine import UpdateEngine
 from octopus.providers import HeuristicProvider
+from octopus.upgrade import UpgradeCheckResult, UpgradeStatus
 
 runner = CliRunner()
+
+
+def test_upgrade_check_supports_table_and_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = UpgradeCheckResult(
+        status=UpgradeStatus.update_available,
+        latest_version="0.4.0",
+        release_url="https://github.com/tty627/octopus/releases/tag/v0.4.0",
+        release_notes="Windows release",
+        checked_at="2026-07-13T00:00:00+00:00",
+    )
+    monkeypatch.setattr("octopus.cli.check_for_upgrade", lambda force: result)
+
+    table = runner.invoke(app, ["upgrade", "check", "--format", "table"])
+    payload = runner.invoke(app, ["upgrade", "check", "--format", "json"])
+    invalid = runner.invoke(app, ["upgrade", "check", "--format", "xml"])
+
+    assert table.exit_code == 0
+    assert "Windows release" in table.stdout
+    assert payload.exit_code == 0
+    assert '"status": "update_available"' in payload.stdout
+    assert invalid.exit_code == 2
 
 
 def test_cli_version_and_repository_lifecycle(

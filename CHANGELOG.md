@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- 简体中文 Tkinter 首次运行向导、六格式确定性示例资料和前五条本地搜索结果。
+- 只读 `RepositoryEstimate` 预检、版本化 Windows 时间/空间系数和稳定错误码。
+- `UpdateProgress`、线程安全 `CancellationToken`、提交前事务回滚及 cancelled RunReport。
+- `octopus upgrade check --format table|json` 与 GUI 24 小时缓存的 GitHub 稳定版检查。
+- PyInstaller 6.21 共享 onedir、Inno Setup 6.7.3 每用户离线安装器及受保护签名 CI。
+- 只记录阶段时间、结果、错误码和计数的本地匿名首次体验报告。
+
+### Changed
+
+- 向导创建的仓库默认关闭 AI，首次流程固定为 0 次 AI 调用。
+- 仓库初始化先持久化本地配置/状态，再注册全局配置；失败仅清理本次 Octopus 文件。
+- watcher/API 子进程命令在冻结环境中复用当前 CLI 可执行文件。
+- 显式 force 继续尊重 Office 编辑锁，但不再等待 quiet-time，保证首次构建立即完成。
+
+### Security
+
+- 升级检查只接受固定 `tty627/octopus` GitHub Release 路径，3 秒超时且失败不阻断。
+- 发布脚本要求主程序、CLI、卸载器和安装器通过 SHA-256 Authenticode 与 RFC 3161 时间戳。
+
 ## [0.3.0] - 2026-07-13
 
 ### Added

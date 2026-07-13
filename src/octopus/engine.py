@@ -25,9 +25,12 @@ from .models import (
     NodeRecord,
     NodeState,
     RunReport,
+    UpdatePhase,
+    UpdateProgress,
     utc_now,
 )
 from .parsers import ParserRegistry, TextParser, is_plain_text
+from .progress import CancellationToken, ProgressCallback, UpdateCancelledError
 from .providers import (
     HeuristicProvider,
     ProviderRateLimitError,
@@ -84,6 +87,43 @@ class UpdateEngine:
             ai_provider="deepseek"
             if type(self.provider).__name__ == "DeepSeekProvider"
             else "heuristic"
+        )
+
+    @staticmethod
+    def _emit(
+        callback: ProgressCallback | None,
+        phase: UpdatePhase,
+        completed: int = 0,
+        total: int = 0,
+        current_path: str = "",
+        *,
+        cancellable: bool = True,
+    ) -> None:
+        if callback is None:
+            return
+        progress_ranges = {
+            UpdatePhase.preparing: (0.0, 0.0),
+            UpdatePhase.scanning: (0.0, 20.0),
+            UpdatePhase.leaf: (20.0, 70.0),
+            UpdatePhase.foldernode: (70.0, 90.0),
+            UpdatePhase.committing: (90.0, 90.0),
+            UpdatePhase.search_rebuild: (95.0, 95.0),
+            UpdatePhase.complete: (100.0, 100.0),
+            UpdatePhase.cancelled: (100.0, 100.0),
+            UpdatePhase.failed: (100.0, 100.0),
+        }
+        start, finish = progress_ranges[phase]
+        ratio = 0.0 if total <= 0 else min(1.0, completed / total)
+        percent = start + (finish - start) * ratio
+        callback(
+            UpdateProgress(
+                phase=phase,
+                completed=completed,
+                total=total,
+                current_path=current_path,
+                percent=percent,
+                cancellable=cancellable,
+            )
         )
 
     def _node_by_path(self, relative: str) -> NodeRecord | None:
@@ -491,7 +531,7 @@ class UpdateEngine:
         self,
         run_id: str,
         started_at: str,
-        status: Literal["success", "partial", "failed", "dry_run"],
+        status: Literal["success", "partial", "failed", "dry_run", "cancelled"],
         recovery_actions: list[str],
         *,
         dry_run: bool = False,
@@ -528,11 +568,15 @@ class UpdateEngine:
         foldernode_only: bool = False,
         retry_only: bool = False,
         force_path: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> UpdateStats:
         run_id = uuid.uuid4().hex
         started_at = utc_now()
         recovery_actions: list[str] = []
         lock_path = octopus_dir(self.index) / "update.lock"
+        transaction: IndexTransaction | None = None
+        self._emit(progress_callback, UpdatePhase.preparing)
         try:
             with RepositoryLock(
                 lock_path,
@@ -555,17 +599,37 @@ class UpdateEngine:
                 for action in recovery_actions:
                     self.logger.event("transaction_recovery", message=action)
 
+                if cancellation_token:
+                    cancellation_token.raise_if_cancelled()
                 transaction = IndexTransaction(self.index, run_id=run_id)
                 self.transaction = transaction
                 scanner = RepositoryScanner(self.config)
-                self.state, outcome = scanner.scan(self.state, force_path=force_path)
+                self.state, outcome = scanner.scan(
+                    self.state,
+                    force_path=force_path,
+                    progress_callback=progress_callback,
+                    cancellation_token=cancellation_token,
+                )
                 self._apply_scan_stats(outcome)
 
                 if not scan_only:
                     file_nodes = [
                         node for node in self.state.nodes.values() if node.node_kind == "raw_file"
                     ]
+                    leaf_total = sum(
+                        (
+                            node.state in {NodeState.failed, NodeState.retry}
+                            if retry_only
+                            else node.state in {NodeState.queued, NodeState.moved}
+                        )
+                        and not foldernode_only
+                        for node in file_nodes
+                    )
+                    leaf_completed = 0
+                    self._emit(progress_callback, UpdatePhase.leaf, 0, leaf_total)
                     for node in file_nodes:
+                        if cancellation_token:
+                            cancellation_token.raise_if_cancelled()
                         if node.state not in {
                             NodeState.queued,
                             NodeState.moved,
@@ -578,7 +642,24 @@ class UpdateEngine:
                         if foldernode_only:
                             should_process = False
                         if should_process:
+                            self._emit(
+                                progress_callback,
+                                UpdatePhase.leaf,
+                                leaf_completed,
+                                leaf_total,
+                                node.raw_relative_path,
+                            )
                             self._process_leaf(node)
+                            leaf_completed += 1
+                            self._emit(
+                                progress_callback,
+                                UpdatePhase.leaf,
+                                leaf_completed,
+                                leaf_total,
+                                node.raw_relative_path,
+                            )
+                            if cancellation_token:
+                                cancellation_token.raise_if_cancelled()
 
                     if not leaf_only:
                         folder_nodes = [
@@ -590,8 +671,26 @@ class UpdateEngine:
                             key=lambda item: len(Path(item.raw_relative_path).parts),
                             reverse=True,
                         )
-                        for node in folder_nodes:
+                        folder_total = len(folder_nodes)
+                        self._emit(progress_callback, UpdatePhase.foldernode, 0, folder_total)
+                        for folder_completed, node in enumerate(folder_nodes):
+                            if cancellation_token:
+                                cancellation_token.raise_if_cancelled()
+                            self._emit(
+                                progress_callback,
+                                UpdatePhase.foldernode,
+                                folder_completed,
+                                folder_total,
+                                node.raw_relative_path,
+                            )
                             self._process_folder(node)
+                            self._emit(
+                                progress_callback,
+                                UpdatePhase.foldernode,
+                                folder_completed + 1,
+                                folder_total,
+                                node.raw_relative_path,
+                            )
 
                 self.state.repository.last_successful_update_at = utc_now()
                 manifest_text = (
@@ -602,10 +701,22 @@ class UpdateEngine:
                     )
                     + "\n"
                 )
+                if cancellation_token:
+                    cancellation_token.raise_if_cancelled()
+                self._emit(
+                    progress_callback,
+                    UpdatePhase.committing,
+                    cancellable=False,
+                )
                 transaction.commit(repository_state_path(self.index), manifest_text)
 
                 derived_ok = True
                 if not scan_only:
+                    self._emit(
+                        progress_callback,
+                        UpdatePhase.search_rebuild,
+                        cancellable=False,
+                    )
                     try:
                         from .search import SearchIndex
 
@@ -631,7 +742,31 @@ class UpdateEngine:
                     self.index,
                     self._report(run_id, started_at, status, recovery_actions),
                 )
+                self._emit(
+                    progress_callback,
+                    UpdatePhase.complete,
+                    1,
+                    1,
+                    cancellable=False,
+                )
                 return self.stats
+        except UpdateCancelledError:
+            if transaction is not None and not transaction.record.manifest_committed:
+                with suppress(OSError, RuntimeError):
+                    transaction.rollback()
+            with suppress(FileExistsError, OSError):
+                write_run_report(
+                    self.index,
+                    self._report(run_id, started_at, "cancelled", recovery_actions),
+                )
+            self._emit(
+                progress_callback,
+                UpdatePhase.cancelled,
+                1,
+                1,
+                cancellable=False,
+            )
+            raise
         except Exception as error:
             self.run_errors.append(
                 {
@@ -643,6 +778,13 @@ class UpdateEngine:
             report = self._report(run_id, started_at, "failed", recovery_actions)
             with suppress(FileExistsError, OSError):
                 write_run_report(self.index, report)
+            self._emit(
+                progress_callback,
+                UpdatePhase.failed,
+                1,
+                1,
+                cancellable=False,
+            )
             raise
         finally:
             self.transaction = None

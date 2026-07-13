@@ -1,0 +1,66 @@
+name: Windows package
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  development-package:
+    if: github.ref_type != 'tag'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+      - run: choco install innosetup --version=6.7.3 -y --no-progress
+      - shell: pwsh
+        run: .\packaging\build_windows.ps1 -Python python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: octopus-windows-development
+          path: release/*
+
+  signed-release:
+    if: github.ref_type == 'tag'
+    runs-on: windows-latest
+    environment: code-signing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+      - run: choco install innosetup --version=6.7.3 -y --no-progress
+      - id: certificate
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64)) { throw "Signing certificate is required" }
+          $path = Join-Path $env:RUNNER_TEMP "octopus-signing.pfx"
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+          $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item -LiteralPath $path -Force
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+      - shell: pwsh
+        env:
+          TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
+        run: .\packaging\build_windows.ps1 -Python python -Release -CertThumbprint "${{ steps.certificate.outputs.thumbprint }}" -TimestampUrl $env:TIMESTAMP_URL
+      - uses: actions/upload-artifact@v4
+        with:
+          name: octopus-windows-signed
+          path: release/*
+      - shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME release\* --verify-tag --generate-notes

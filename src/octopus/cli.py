@@ -35,6 +35,7 @@ from .service_control import (
     stop_api_process,
 )
 from .transactions import load_run_report
+from .upgrade import check_for_upgrade
 from .utils import atomic_write_text
 from .validation import validate_repository
 from .watcher import run_watch_loop, start_watch, stop_watch, watch_status
@@ -48,10 +49,12 @@ repo_app = typer.Typer(help="Manage registered Octopus repositories.")
 watch_app = typer.Typer(help="Manage the polling watcher.")
 api_app = typer.Typer(help="Manage the authenticated loopback Local API.")
 service_app = typer.Typer(help="Manage the optional Windows SCM service.")
+upgrade_app = typer.Typer(help="Check for Octopus software updates.")
 app.add_typer(repo_app, name="repo")
 app.add_typer(watch_app, name="watch")
 app.add_typer(api_app, name="api")
 app.add_typer(service_app, name="service")
+app.add_typer(upgrade_app, name="upgrade")
 console = Console()
 
 
@@ -73,6 +76,28 @@ def _repository(value: str | None) -> Path:
 def version() -> None:
     """Print the installed Octopus version."""
     console.print(__version__)
+
+
+@upgrade_app.command("check")
+def upgrade_check(
+    output_format: Annotated[str, typer.Option("--format", help="table or json")] = "table",
+) -> None:
+    """Check GitHub for the latest stable Octopus release without downloading it."""
+    result = check_for_upgrade(force=True)
+    if output_format == "json":
+        console.print_json(json.dumps(result.model_dump(mode="json"), ensure_ascii=False))
+    elif output_format == "table":
+        table = Table("Field", "Value")
+        table.add_row("Status", result.status.value)
+        table.add_row("Current", result.current_version)
+        table.add_row("Latest", result.latest_version or "unavailable")
+        table.add_row("Release", result.release_url or "-")
+        table.add_row("Notes", result.release_notes or "-")
+        table.add_row("Error", result.error_code or "-")
+        console.print(table)
+    else:
+        console.print("[red]--format must be table or json[/red]")
+        raise typer.Exit(2)
 
 
 @app.command("init")

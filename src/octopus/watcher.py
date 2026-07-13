@@ -12,6 +12,7 @@ from .config import load_repository_config, octopus_dir
 from .engine import UpdateEngine
 from .locking import pid_is_alive
 from .models import utc_now
+from .runtime import octopus_command
 from .utils import atomic_write_json
 
 
@@ -50,7 +51,7 @@ def start_watch(index_repository: Path) -> dict[str, object]:
             | subprocess.CREATE_NO_WINDOW
         )
     process = subprocess.Popen(
-        [sys.executable, "-m", "octopus", "_watch-run", "--repository", str(index_repository)],
+        octopus_command("_watch-run", "--repository", str(index_repository)),
         stdin=subprocess.DEVNULL,
         stdout=log_stream,
         stderr=log_stream,

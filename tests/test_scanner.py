@@ -48,3 +48,19 @@ def test_long_running_office_lock_becomes_stale(repository: tuple[Path, Path, ob
     node = next(item for item in state.nodes.values() if item.raw_relative_path == "locked.xlsx")
     assert node.state == NodeState.stale
     assert node.node_id not in state.queues.pending_edit
+
+
+def test_force_queues_fresh_file_without_waiting_for_quiet_window(
+    repository: tuple[Path, Path, object],
+) -> None:
+    raw, index, config = repository
+    config.stability.minimum_quiet_seconds = 3600
+    (raw / "fresh.pdf").write_bytes(b"fresh")
+
+    state = load_repository_state(index, config)
+    state, outcome = RepositoryScanner(config).scan(state, force_path="*")
+
+    node = next(item for item in state.nodes.values() if item.raw_relative_path == "fresh.pdf")
+    assert node.state == NodeState.queued
+    assert node.node_id in state.queues.leaf_update
+    assert outcome.queued == 1
