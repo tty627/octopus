@@ -60,6 +60,6 @@ Filename: "{app}\octopus-cli.exe"; Parameters: "api stop"; Flags: runhidden skip
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
-    MsgBox('Octopus 已卸载。您的资料、索引与 %APPDATA%\Octopus 配置均已保留。',
-      mbInformation, MB_OK);
+    SuppressibleMsgBox('Octopus 已卸载。您的资料、索引与 %APPDATA%\Octopus 配置均已保留。',
+      mbInformation, MB_OK, IDOK);
 end;

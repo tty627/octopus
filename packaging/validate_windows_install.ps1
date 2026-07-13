@@ -21,10 +21,63 @@ function Assert-NativeSuccess {
 }
 
 function Invoke-InstallerProcess {
-    param([string]$FilePath, [string[]]$Arguments, [string]$Operation)
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$Operation,
+        [int]$TimeoutSeconds = 300
+    )
+    Write-Host "$Operation started"
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -WindowStyle Hidden
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw "$Operation timed out after $TimeoutSeconds seconds"
+    }
     if ($process.ExitCode -ne 0) {
         throw "$Operation failed with exit code $($process.ExitCode)"
+    }
+    Write-Host "$Operation completed"
+}
+
+function Wait-PathAbsent {
+    param(
+        [string]$Path,
+        [string]$Operation,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while (Test-Path -LiteralPath $Path) {
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw "$Operation did not remove $Path within $TimeoutSeconds seconds"
+        }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+function Wait-FileUnlocked {
+    param(
+        [string]$Path,
+        [string]$Operation,
+        [int]$TimeoutSeconds = 300
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        try {
+            $stream = [IO.File]::Open(
+                $Path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::None
+            )
+            $stream.Dispose()
+            return
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "$Operation did not release $Path within $TimeoutSeconds seconds"
+            }
+            Start-Sleep -Milliseconds 200
+        }
     }
 }
 
@@ -89,8 +142,8 @@ if ($RunDefender) {
 
 $InstallDirectory = Join-Path $WorkingRoot "Installed Octopus"
 $AppData = Join-Path $WorkingRoot "AppData"
-$Raw = Join-Path $WorkingRoot "Raw 资料"
-$Index = Join-Path $WorkingRoot "Index 索引"
+$Raw = Join-Path $WorkingRoot ("Raw " + [char]0x8D44 + [char]0x6599)
+$Index = Join-Path $WorkingRoot ("Index " + [char]0x7D22 + [char]0x5F15)
 $InstallLog = Join-Path $WorkingRoot "install.log"
 $ReinstallLog = Join-Path $WorkingRoot "reinstall.log"
 $UninstallLog = Join-Path $WorkingRoot "uninstall.log"
@@ -101,6 +154,7 @@ Set-Content -LiteralPath $RawSentinel -Value "Octopus must never modify Raw." -E
 $RawHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $RawSentinel).Hash.ToLowerInvariant()
 
 $previousAppData = $env:APPDATA
+$installIsActive = $false
 try {
     $env:APPDATA = $AppData
     $installArguments = @(
@@ -108,6 +162,7 @@ try {
         "/DIR=`"$InstallDirectory`"", "/LOG=`"$InstallLog`""
     )
     Invoke-InstallerProcess $Installer $installArguments "Silent install"
+    $installIsActive = $true
 
     $Cli = Join-Path $InstallDirectory "octopus-cli.exe"
     $Gui = Join-Path $InstallDirectory "Octopus.exe"
@@ -149,6 +204,9 @@ try {
     Invoke-InstallerProcess $Uninstaller @(
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=`"$UninstallLog`""
     ) "Silent uninstall"
+    Wait-PathAbsent $Uninstaller "Silent uninstall"
+    Wait-FileUnlocked $UninstallLog "Silent uninstall"
+    $installIsActive = $false
     Assert-FileHash $RawSentinel $RawHash "Raw sentinel after uninstall"
     Assert-FileHash $IndexSentinel $IndexHash "Index sentinel after uninstall"
     Assert-FileHash $GlobalConfig $ConfigHash "Global config after uninstall"
@@ -157,17 +215,18 @@ try {
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
         "/DIR=`"$InstallDirectory`"", "/LOG=`"$ReinstallLog`""
     ) "Silent reinstall"
+    $installIsActive = $true
     $Cli = Join-Path $InstallDirectory "octopus-cli.exe"
-    $repositories = (& $Cli repo list | Out-String)
-    Assert-NativeSuccess "List repositories after reinstall"
-    if ($repositories -notmatch "Acceptance Repository") {
-        throw "Reinstall did not recognize the preserved repository"
-    }
+    & $Cli repo show --repository "Acceptance Repository" | Out-Null
+    Assert-NativeSuccess "Resolve repository after reinstall"
 
     $Uninstaller = Join-Path $InstallDirectory "unins000.exe"
     Invoke-InstallerProcess $Uninstaller @(
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=`"$FinalUninstallLog`""
     ) "Final silent uninstall"
+    Wait-PathAbsent $Uninstaller "Final silent uninstall"
+    Wait-FileUnlocked $FinalUninstallLog "Final silent uninstall"
+    $installIsActive = $false
     Assert-FileHash $RawSentinel $RawHash "Raw sentinel after final uninstall"
     Assert-FileHash $IndexSentinel $IndexHash "Index sentinel after final uninstall"
     Assert-FileHash $GlobalConfig $ConfigHash "Global config after final uninstall"
@@ -195,7 +254,7 @@ try {
 }
 finally {
     $cleanupUninstaller = Join-Path $InstallDirectory "unins000.exe"
-    if (Test-Path -LiteralPath $cleanupUninstaller -PathType Leaf) {
+    if ($installIsActive -and (Test-Path -LiteralPath $cleanupUninstaller -PathType Leaf)) {
         try {
             Invoke-InstallerProcess $cleanupUninstaller @(
                 "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"

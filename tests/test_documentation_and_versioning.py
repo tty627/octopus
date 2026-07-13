@@ -118,6 +118,7 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert "VersionInfoVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductTextVersion={#AppVersion}" in installer
+    assert "SuppressibleMsgBox(" in installer
     language_installer = (ROOT / "packaging" / "install_inno_language.ps1").read_text(
         encoding="utf-8"
     )
