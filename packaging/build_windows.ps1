@@ -19,7 +19,8 @@ function Assert-NativeSuccess {
     }
 }
 
-$PythonCommand = Get-Command $Python -CommandType Application -ErrorAction SilentlyContinue
+$PythonCommand = Get-Command $Python -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1
 if (-not $PythonCommand) {
     throw "Python executable not found: $Python"
 }
