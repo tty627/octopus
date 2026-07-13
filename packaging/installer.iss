@@ -31,7 +31,8 @@ SetupLogging=yes
 UninstallDisplayIcon={app}\Octopus.exe
 VersionInfoVersion={#AppNumericVersion}
 VersionInfoProductName=Octopus
-VersionInfoProductVersion={#AppVersion}
+VersionInfoProductVersion={#AppNumericVersion}
+VersionInfoProductTextVersion={#AppVersion}
 #ifdef SignedBuild
 SignTool=OctopusSign
 SignedUninstaller=yes

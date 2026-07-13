@@ -116,3 +116,5 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert 'releaseArguments += "--prerelease"' in workflow
     assert "validate_windows_install.ps1" in workflow
     assert "VersionInfoVersion={#AppNumericVersion}" in installer
+    assert "VersionInfoProductVersion={#AppNumericVersion}" in installer
+    assert "VersionInfoProductTextVersion={#AppVersion}" in installer
