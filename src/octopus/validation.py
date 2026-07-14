@@ -13,6 +13,7 @@ from .models import (
     ValidationReport,
     ValidationSeverity,
 )
+from .parsers import is_plain_text
 from .rendering import read_machine_header, validate_index_text
 from .search import SEARCH_SCHEMA_VERSION
 
@@ -170,6 +171,16 @@ def validate_repository(index_repository: Path) -> ValidationReport:
                 report.search_documents = int(
                     connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
                 )
+                report.search_index_documents = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM documents WHERE index_type != 'text'"
+                    ).fetchone()[0]
+                )
+                report.search_text_documents = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM documents WHERE index_type = 'text'"
+                    ).fetchone()[0]
+                )
                 try:
                     row = connection.execute(
                         "SELECT value FROM search_metadata WHERE key = 'schema_version'"
@@ -187,12 +198,24 @@ def validate_repository(index_repository: Path) -> ValidationReport:
                     "SQLite cache schema is outdated and will rebuild automatically",
                     search_database,
                 )
-            if report.search_documents != report.markdown_indexes:
+            expected_text_documents = sum(
+                1
+                for node in state.nodes.values()
+                if node.node_kind == "raw_file"
+                and node.state not in {NodeState.orphaned, NodeState.ignored}
+                and is_plain_text(
+                    raw / Path(node.raw_relative_path.replace("/", os.sep))
+                )
+            )
+            if (
+                report.search_index_documents != report.markdown_indexes
+                or report.search_text_documents != expected_text_documents
+            ):
                 _issue(
                     report,
                     ValidationSeverity.warning,
                     "search_cache_out_of_sync",
-                    "SQLite document count differs from Markdown index count",
+                    "SQLite document counts differ from Markdown/text index sources",
                     search_database,
                 )
         except (sqlite3.Error, OSError) as error:

@@ -6,6 +6,8 @@ import os
 import shutil
 import sys
 import tempfile
+import time
+import uuid
 import webbrowser
 from dataclasses import asdict
 from pathlib import Path
@@ -26,10 +28,18 @@ from .config import (
     save_global_config,
 )
 from .engine import UpdateEngine
+from .evaluation import (
+    StudyRecord,
+    evaluate_retrieval,
+    load_retrieval_tasks,
+    study_assignments,
+    study_record_json,
+    summarize_study,
+)
 from .markmap import render_markmap
 from .migrations import apply_migrations, migration_report_markdown, plan_migrations
 from .prompts import PROMPT_VERSION
-from .search import SearchIndex, results_markdown, search_report_markdown
+from .search import SearchIndex, search_report_markdown
 from .search_evaluation import (
     default_search_evaluation_dataset_path,
     evaluate_search_dataset,
@@ -75,12 +85,14 @@ api_app = typer.Typer(help="Manage the authenticated loopback Local API.")
 service_app = typer.Typer(help="Manage the optional Windows SCM service.")
 upgrade_app = typer.Typer(help="Check for Octopus software updates.")
 acceptance_app = typer.Typer(help="Export and summarize local anonymous acceptance records.")
+evaluation_app = typer.Typer(help="Run retrieval evaluation and controlled user studies.")
 app.add_typer(repo_app, name="repo")
 app.add_typer(watch_app, name="watch")
 app.add_typer(api_app, name="api")
 app.add_typer(service_app, name="service")
 app.add_typer(upgrade_app, name="upgrade")
 app.add_typer(acceptance_app, name="acceptance")
+app.add_typer(evaluation_app, name="evaluate")
 console = Console()
 
 
@@ -658,8 +670,11 @@ def service_uninstall() -> None:
 def search(
     query: str,
     repository: RepositoryOption = None,
+    mode: Annotated[
+        str, typer.Option("--mode", help="local or auto; auto uses AI when available.")
+    ] = "local",
     full: Annotated[
-        bool, typer.Option("--full", help="Use DeepSeek to rerank candidates.")
+        bool, typer.Option("--full", help="Compatibility alias for --mode auto.")
     ] = False,
     limit: Annotated[int, typer.Option("--limit", min=1, max=100)] = 20,
     output_format: Annotated[
@@ -677,12 +692,16 @@ def search(
     """Search Leaf and FolderNode indexes without reading non-text originals."""
     index = _repository(repository)
     search_index = SearchIndex(index)
+    selected_mode = "auto" if full else mode.casefold()
+    if selected_mode not in {"local", "auto"}:
+        console.print("[red]--mode must be local or auto[/red]")
+        raise typer.Exit(2)
     try:
-        search_report = search_index.full_search_report(query, limit) if full else None
-        results = search_report.results if search_report else search_index.search(query, limit)
+        search_report = search_index.search_report(query, limit, selected_mode)  # type: ignore[arg-type]
+        results = search_report.results
     except Exception as error:
         console.print(f"[red]Search failed:[/red] {error}")
-        raise typer.Exit(4 if full else 2) from error
+        raise typer.Exit(2) from error
     if output_format == "json":
         value = json.dumps(
             [item.model_dump(mode="json") for item in results],
@@ -690,16 +709,9 @@ def search(
             indent=2,
         )
     elif output_format == "report-json":
-        if search_report is None:
-            console.print("[red]--format report-json requires --full[/red]")
-            raise typer.Exit(2)
         value = json.dumps(search_report.model_dump(mode="json"), ensure_ascii=False, indent=2)
     elif output_format == "markdown":
-        value = (
-            search_report_markdown(search_report)
-            if search_report
-            else results_markdown(query, results)
-        )
+        value = search_report_markdown(search_report)
     else:
         console.print("[red]--format must be markdown, json, or report-json[/red]")
         raise typer.Exit(2)
@@ -721,11 +733,7 @@ def search(
         markdown_path = (
             output if output_format == "markdown" and output else markmap.with_suffix(".md")
         )
-        markdown = (
-            search_report_markdown(search_report)
-            if search_report
-            else results_markdown(query, results)
-        )
+        markdown = search_report_markdown(search_report)
         atomic_write_text(markdown_path, markdown)
         try:
             render_markmap(markdown_path, markmap)
@@ -735,6 +743,83 @@ def search(
                 f"[yellow]Markdown was preserved, but Markmap rendering failed:[/yellow] {error}"
             )
             raise typer.Exit(5) from error
+
+
+@evaluation_app.command("retrieval")
+def evaluate_retrieval_command(
+    tasks: Annotated[Path, typer.Option("--tasks", exists=True, dir_okay=False)],
+    judgments: Annotated[Path, typer.Option("--judgments", exists=True, dir_okay=False)],
+    repository: RepositoryOption = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    enforce: Annotated[bool, typer.Option("--enforce")] = False,
+) -> None:
+    """Measure deterministic local Hit@1/5 and MRR against blind judgments."""
+    result = evaluate_retrieval(_repository(repository), tasks, judgments)
+    rendered = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    if output:
+        atomic_write_text(output, rendered)
+        console.print(f"Wrote {output}")
+    else:
+        console.print(rendered, end="")
+    if enforce and not result["passes_v05_gate"]:
+        raise typer.Exit(1)
+
+
+@evaluation_app.command("study")
+def evaluate_study_command(
+    tasks: Annotated[Path, typer.Option("--tasks", exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    participant: Annotated[str, typer.Option("--participant")] = "",
+    task_count: Annotated[int, typer.Option("--task-count", min=2)] = 12,
+) -> None:
+    """Run a local, counterbalanced timing session without storing queries or paths."""
+    loaded = load_retrieval_tasks(tasks)
+    participant_id, assignments = study_assignments(loaded, participant)
+    assignments = assignments[: min(task_count, len(assignments))]
+    session_id = uuid.uuid4().hex
+    lines: list[str] = []
+    for position, (task, condition) in enumerate(assignments, start=1):
+        console.print(
+            f"\n[bold]Task {position}/{len(assignments)}[/bold] · condition={condition}\n"
+            f"{task.query}"
+        )
+        if not typer.confirm("Ready to start?", default=True):
+            continue
+        started = time.perf_counter()
+        typer.prompt("Press Enter after opening the chosen result", default="", show_default=False)
+        duration_ms = max(0, int((time.perf_counter() - started) * 1_000))
+        success = typer.confirm("Was the correct target opened?", default=True)
+        error_code = "" if success else typer.prompt("Failure code", default="not_found")
+        record = StudyRecord(
+            session_id=session_id,
+            participant_id=participant_id,
+            task_id=task.task_id,
+            condition=condition,
+            duration_ms=duration_ms,
+            success=success,
+            error_code=error_code,
+        )
+        lines.append(study_record_json(record))
+        atomic_write_text(output, "\n".join(lines) + "\n")
+    console.print(f"Wrote anonymous study records to {output}")
+
+
+@evaluation_app.command("summarize")
+def evaluate_study_summary_command(
+    records: Annotated[Path, typer.Option("--records", exists=True, dir_okay=False)],
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    enforce: Annotated[bool, typer.Option("--enforce")] = False,
+) -> None:
+    """Aggregate one-version study records and enforce the 20-person/50% gate."""
+    result = summarize_study(records)
+    rendered = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    if output:
+        atomic_write_text(output, rendered)
+        console.print(f"Wrote {output}")
+    else:
+        console.print(rendered, end="")
+    if enforce and not result["passes_v05_gate"]:
+        raise typer.Exit(1)
 
 
 @watch_app.command("start")

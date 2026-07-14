@@ -180,7 +180,7 @@ def _materialize_dataset(dataset: SearchEvaluationDataset, workspace: Path) -> P
     UpdateEngine(index).run(force_path="*")
     search = SearchIndex(index)
     by_source = {
-        document.source_relative_path: document
+        document.raw_relative_path: document
         for document in search._iter_documents()
         if document.index_type == "leaf"
     }
@@ -234,7 +234,7 @@ def evaluate_search_dataset(
         task_results: list[SearchEvaluationTaskResult] = []
         for task in dataset.tasks:
             results = search.search(task.query, limit=max(20, len(dataset.documents)))
-            returned_paths = [item.source_relative_path for item in results]
+            returned_paths = [item.raw_relative_path for item in results]
             relevant = set(task.relevant_paths)
             search_rank = next(
                 (rank for rank, path in enumerate(returned_paths, start=1) if path in relevant),
@@ -247,15 +247,15 @@ def evaluate_search_dataset(
                 if path in relevant
             )
             relevant_result = next(
-                (item for item in results if item.source_relative_path in relevant),
+                (item for item in results if item.raw_relative_path in relevant),
                 None,
             )
             explanation_ok = bool(
                 relevant_result
-                and relevant_result.source_relative_path
+                and relevant_result.raw_relative_path
                 and relevant_result.open_target_uri
                 and relevant_result.match_evidence
-                and relevant_result.extraction_evidence
+                and relevant_result.evidence
             )
             if "stale" in task.categories:
                 explanation_ok = explanation_ok and bool(

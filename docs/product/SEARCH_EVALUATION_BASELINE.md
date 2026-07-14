@@ -18,7 +18,8 @@
 
 - 数据集：`benchmarks/datasets/search-value-v1.json`
 - 数据集标识/版本：`octopus-search-value` / `1.0.0`
-- 检索算法：`fts5-bm25-explain-v1`
+- 检索算法：`octopus-0.5-local-v2-explain`
+- 扩展数据集：`octopus-retrieval-v1`（60 任务，Hit@1/Hit@5/MRR 均为 90.0%）
 - 工程报告：`.octopus-dev/benchmarks/search-value-v05.json`（本地生成，不入库）
 - 增量报告：`.octopus-dev/benchmarks/incremental-v05.json`（本地生成，不入库）
 

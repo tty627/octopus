@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +33,8 @@ class UpdateRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2_000)
-    full: bool = False
+    mode: Literal["local", "auto"] | None = None
+    full: bool | None = None
     limit: int = Field(default=20, ge=1, le=100)
 
 
@@ -195,15 +196,18 @@ def create_app(
 
     @app.post("/v1/repositories/{repository_id}/search", dependencies=authenticated)
     def search(repository_id: str, request: SearchRequest) -> Any:
-        search_index = SearchIndex(_repository_path(repository_id))
-        if request.full:
-            return search_index.full_search_report(request.query, request.limit).model_dump(
-                mode="json"
+        if request.mode is not None and request.full is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "mode and legacy full cannot be supplied together",
             )
-        return [
-            result.model_dump(mode="json")
-            for result in search_index.search(request.query, request.limit)
-        ]
+        mode: Literal["local", "auto"] = request.mode or (
+            "auto" if request.full else "local"
+        )
+        search_index = SearchIndex(_repository_path(repository_id))
+        return search_index.search_report(request.query, request.limit, mode).model_dump(
+            mode="json"
+        )
 
     @app.post("/v1/repositories/{repository_id}/validate", dependencies=authenticated)
     def validate(repository_id: str) -> dict[str, Any]:

@@ -31,7 +31,10 @@ The `v1.0.1` under `docs/specs/` is a specification revision, not a software rel
 - `octopus evaluate-search --enforce` for Top-5, MRR, task-failure, inspection-step and explanation
   contract gates without an API key.
 - `octopus search --open-result N` for opening the selected source or index target.
-- Disposable search schema `0.5` automatically rebuilds from existing Markdown indexes.
+- Plain-text files as independent results plus Manifest-generation-bound incremental cache refresh.
+- The 60-task `octopus-retrieval-v1` suite reaches 54/60 Hit@5 (90.0%); the focused 10-task
+  explanation suite reaches 100% Top-5 and MRR 1.00 with no contract failures.
+- Search schema `0.5` automatically rebuilds old disposable caches.
 
 ## v0.4 capabilities
 
@@ -75,7 +78,8 @@ Source/development installations require:
 
 - Python 3.12+
 - Node.js with `npx` only when HTML Markmap rendering is needed
-- A `DEEPSEEK_API_KEY` for AI summaries and `search --full`
+- A `DEEPSEEK_API_KEY` only for AI summaries and optional `search --mode auto`; local search and
+  automatic degradation require no key
 
 ## Install for development
 
@@ -110,6 +114,7 @@ octopus validate --format json
 octopus report --last --format markdown
 octopus search "项目需求"
 octopus search "项目需求" --format json --open-result 1
+octopus search --mode auto "找到最重要的项目需求和相关材料" --format report-json
 octopus search --full "找到最重要的项目需求和相关材料" --format report-json
 octopus search --full "找到最重要的项目需求和相关材料" --markmap result.html
 octopus evaluate-search --output .octopus-dev\benchmarks\search-value.json --enforce
@@ -117,6 +122,9 @@ octopus watch start
 octopus watch status
 octopus watch stop
 octopus upgrade check --format json
+octopus evaluate retrieval --tasks benchmarks/retrieval/v1/tasks.jsonl --judgments benchmarks/retrieval/v1/judgments.jsonl --enforce
+octopus evaluate study --tasks benchmarks/retrieval/v1/tasks.jsonl --output study.jsonl
+octopus evaluate summarize --records study.jsonl --output study-summary.json
 ```
 
 The first automatic observation may leave recently changed files in `pending_stable`. Explicit

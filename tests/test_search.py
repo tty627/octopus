@@ -10,8 +10,17 @@ from PIL import Image
 
 from octopus.engine import UpdateEngine
 from octopus.models import GeneratedSearchAnswer, SearchResult
-from octopus.providers import HeuristicProvider
+from octopus.providers import (
+    HeuristicProvider,
+    ProviderAuthError,
+    ProviderBudgetError,
+    ProviderOutputError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
+    ProviderTransientError,
+)
 from octopus.search import (
+    SEARCH_ALGORITHM_VERSION,
     SQLITE_ID_BATCH_SIZE,
     SearchIndex,
     analyze_terms,
@@ -45,13 +54,146 @@ def test_search_database_is_rebuildable(repository: tuple[Path, Path, object]) -
     leaf_result = next(
         item for item in search.search("需求说明.docx") if item.index_type == "leaf"
     )
-    assert leaf_result.source_relative_path == "需求说明.docx"
+    assert leaf_result.raw_relative_path == "需求说明.docx"
     markdown = results_markdown("项目需求", results)
     assert "file:///" in markdown
     assert "推荐原因" in markdown
     assert "命中证据" in markdown
     search.database.unlink()
     assert search.search("Python API")
+
+
+def test_plain_text_is_an_explainable_file_result(
+    repository: tuple[Path, Path, object],
+) -> None:
+    raw, index, _ = repository
+    (raw / "budget-review.md").write_text(
+        "# Budget review\nProject Atlas approval evidence", encoding="utf-8"
+    )
+    UpdateEngine(index).run(force_path="*")
+
+    report = SearchIndex(index).search_report("Atlas budget approval", limit=5)
+
+    result = next(item for item in report.results if item.name == "budget-review.md")
+    assert result.index_type == "text"
+    assert result.raw_relative_path == "budget-review.md"
+    assert result.recommended_open_target == "source"
+    assert result.evidence
+    assert result.explanation
+    assert report.search_algorithm_version == SEARCH_ALGORITHM_VERSION
+    assert report.actual_mode == "local"
+
+
+def test_auto_search_degrades_for_missing_key_and_provider_failure(
+    repository: tuple[Path, Path, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, index, _ = repository
+    (raw / "fallback.txt").write_text("offline fallback evidence", encoding="utf-8")
+    UpdateEngine(index).run(force_path="*")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    missing_key = SearchIndex(index).search_report("fallback evidence", mode="auto")
+    assert missing_key.actual_mode == "degraded"
+    assert missing_key.degradation_reason in {"ai_disabled", "ai_key_not_configured"}
+    assert missing_key.results
+
+    class FailingProvider(HeuristicProvider):
+        def rerank_search(
+            self, query: str, results: list[SearchResult]
+        ) -> list[SearchResult]:
+            raise ProviderTransientError("offline")
+
+    monkeypatch.setattr(
+        "octopus.search.create_provider", lambda config, require_network: FailingProvider()
+    )
+    failed = SearchIndex(index).search_report("fallback evidence", mode="auto")
+    assert failed.actual_mode == "degraded"
+    assert failed.degradation_reason == "ai_unavailable"
+    assert [item.node_id for item in failed.results] == [
+        item.node_id for item in missing_key.results
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (ProviderAuthError("auth"), "ai_auth_failed"),
+        (ProviderQuotaError("quota"), "ai_quota_exhausted"),
+        (ProviderBudgetError("budget"), "ai_budget_exhausted"),
+        (ProviderRateLimitError("rate"), "ai_rate_limited"),
+        (ProviderOutputError("json"), "ai_invalid_output"),
+    ],
+)
+def test_auto_search_provider_error_codes_are_stable(
+    repository: tuple[Path, Path, object],
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    reason: str,
+) -> None:
+    raw, index, _ = repository
+    (raw / "provider.txt").write_text("provider fallback", encoding="utf-8")
+    UpdateEngine(index).run(force_path="*")
+
+    class FailingProvider(HeuristicProvider):
+        def rerank_search(
+            self, query: str, results: list[SearchResult]
+        ) -> list[SearchResult]:
+            raise error
+
+    monkeypatch.setattr(
+        "octopus.search.create_provider", lambda config, require_network: FailingProvider()
+    )
+    report = SearchIndex(index).search_report("provider fallback", mode="auto")
+    assert report.actual_mode == "degraded"
+    assert report.degradation_reason == reason
+    assert report.results
+
+
+def test_incremental_search_refresh_tracks_text_modify_move_and_delete(
+    repository: tuple[Path, Path, object],
+) -> None:
+    raw, index, _ = repository
+    source = raw / "notes.txt"
+    source.write_text("first edition", encoding="utf-8")
+    first = UpdateEngine(index).run(force_path="*")
+    assert first.search_refresh_mode == "rebuild"
+
+    source.write_text("second edition migration", encoding="utf-8")
+    modified = UpdateEngine(index).run(force_path="notes.txt")
+    assert modified.search_refresh_mode == "incremental"
+    assert modified.search_documents_upserted >= 1
+    assert any(item.name == "notes.txt" for item in SearchIndex(index).search("migration"))
+
+    moved = raw / "renamed-notes.txt"
+    source.rename(moved)
+    UpdateEngine(index).run(force_path="*")
+    renamed = SearchIndex(index).search("renamed notes")
+    assert any(item.name == "renamed-notes.txt" for item in renamed)
+    assert not any(item.name == "notes.txt" for item in renamed)
+
+    moved.unlink()
+    UpdateEngine(index).run(force_path="*")
+    assert not any(item.name == "renamed-notes.txt" for item in SearchIndex(index).search("notes"))
+
+
+def test_failed_derived_refresh_is_rebuilt_from_manifest_generation(
+    repository: tuple[Path, Path, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, index, _ = repository
+    source = raw / "recovery.txt"
+    source.write_text("before recovery", encoding="utf-8")
+    UpdateEngine(index).run(force_path="*")
+    source.write_text("after recovery generation", encoding="utf-8")
+
+    def fail_refresh(*args: object, **kwargs: object) -> dict[str, int | str]:
+        raise sqlite3.OperationalError("injected refresh failure")
+
+    monkeypatch.setattr(SearchIndex, "refresh", fail_refresh)
+    stats = UpdateEngine(index).run(force_path="recovery.txt")
+    assert stats.failed == 1
+
+    results = SearchIndex(index).search("after recovery generation")
+    assert any(item.name == "recovery.txt" for item in results)
 
 
 def test_full_search_expands_folder_children_without_reading_raw(
@@ -130,6 +272,13 @@ def test_field_weighting_prefers_exact_filename_and_cache_auto_migrates(
         connection.commit()
     migrated = search.search("alpha-project.png")
     assert migrated[0].name == "alpha-project.png"
+    with closing(sqlite3.connect(search.database)) as connection:
+        connection.execute(
+            "UPDATE search_metadata SET value = '-1' WHERE key = 'manifest_generation'"
+        )
+        connection.commit()
+    refreshed = search.search("alpha-project.png")
+    assert refreshed[0].name == "alpha-project.png"
 
 
 def test_full_search_rejects_provider_citations_outside_candidates(
