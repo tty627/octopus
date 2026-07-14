@@ -117,3 +117,13 @@ python -m benchmarks.performance_gate `
   --candidate .octopus-dev/benchmarks/release-gates-v08.json `
   --approve transaction_growth_ratio --enforce
 ```
+
+## v0.9 RC 工程复测（2026-07-14）
+
+同一参考工作站、`0.9.0rc1` 提交前候选：增量 P50/P95 为 87.50/88.57 ms；400/800
+文件事务 P50 为 2.254/4.392 s，P95 为 2.727/4.613 s，增长比 1.949。全部绝对门槛通过。
+
+800 P95 和增长比相对 v0.7 记录值分别变化 66.58% 和 66.14%，门禁要求显式列名批准。
+RC 没有修改事务核心，且 v0.8 同机复测为 3.013 s，说明工作站时序波动显著；本次批准只允许
+工程迭代继续，不替代正式外部发布前在受控空闲机上的复跑。原始五次测量位于忽略目录
+`.octopus-dev/benchmarks/transactions-v09.json`。

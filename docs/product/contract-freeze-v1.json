@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "frozen_for_product_major": 1,
+  "frozen_at_candidate": "0.9.0rc1",
+  "contracts": {
+    "global_config_schema": "0.2",
+    "repository_schema": "0.2",
+    "markdown_index_schema": "0.2",
+    "local_api": "1.0",
+    "plugin_api": "1.0",
+    "plugin_permissions": [
+      "export.copy_confirmed",
+      "export.write",
+      "index.query",
+      "index.timeline"
+    ],
+    "search_cache_schema": "0.5",
+    "search_report_schema": "1.0",
+    "diagnostic_bundle_schema": "1.0"
+  }
+}

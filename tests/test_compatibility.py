@@ -10,12 +10,12 @@ from octopus.compatibility import (
 )
 
 
-def test_two_previous_beta_candidates_are_explicit_upgrade_and_rollback_sources() -> None:
+def test_all_previous_beta_candidates_are_explicit_upgrade_and_rollback_sources() -> None:
     report = compatibility_report()
 
     assert report.product_version == __version__
     assert report.in_place_upgrade_sources == list(SUPPORTED_IN_PLACE_UPGRADE_SOURCES)
-    assert len(report.upgrade_rehearsals) == 2
+    assert len(report.upgrade_rehearsals) == 3
     assert all(item.supported for item in report.upgrade_rehearsals)
     assert all(item.binary_rollback_safe for item in report.upgrade_rehearsals)
     assert all(not item.persistent_migration_required for item in report.upgrade_rehearsals)
@@ -36,7 +36,7 @@ def test_contract_matrix_covers_all_persistent_and_public_boundaries() -> None:
         "plugin_api",
         "search_cache",
     }
-    assert contracts["plugin_api"].stability == "developer_preview"
+    assert contracts["plugin_api"].stability == "stable"
     assert contracts["search_cache"].stability == "rebuildable"
     assert contracts["local_api"].current_version == "1.0"
 

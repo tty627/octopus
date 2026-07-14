@@ -58,6 +58,7 @@ from .plugin_sdk import (
     run_plugin,
 )
 from .prompts import PROMPT_VERSION
+from .release_audit import audit_release
 from .search import SearchIndex, search_report_markdown
 from .search_evaluation import (
     default_search_evaluation_dataset_path,
@@ -261,6 +262,26 @@ def compatibility_command() -> None:
     console.print_json(
         json.dumps(compatibility_report().model_dump(mode="json"), ensure_ascii=False)
     )
+
+
+@app.command("release-audit")
+def release_audit_command(
+    expected_version: Annotated[str, typer.Option("--expected-version")] = __version__,
+    artifacts: Annotated[Path | None, typer.Option("--artifacts")] = None,
+) -> None:
+    """Audit frozen contracts, blockers, documentation, versions, and optional artifacts."""
+    try:
+        report = audit_release(
+            Path(__file__).resolve().parents[2],
+            expected_version,
+            artifact_directory=artifacts,
+        )
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        console.print(f"[red]Release audit failed:[/red] {error}")
+        raise typer.Exit(4) from error
+    console.print_json(json.dumps(report.model_dump(mode="json"), ensure_ascii=False))
+    if not report.engineering_passed:
+        raise typer.Exit(4)
 
 
 @acceptance_app.command("export")

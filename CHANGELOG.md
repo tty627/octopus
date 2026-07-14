@@ -6,6 +6,9 @@
 
 ### Added
 
+- v0.9 v1 契约冻结清单、`octopus release-audit` 和版本/阻断/文档/工件一致性检查。
+- 机器可读 P0/P1 登记、支持分级/角色政策与紧急回滚手册。
+- wheel/sdist 工程 RC Build Manifest 与 SHA256SUMS 独立审计链路。
 - v0.8 可校验迁移备份、失败自动恢复与 `migrate --rollback RUN_ID` 显式回滚。
 - 默认仅本地的脱敏诊断包、桌面/Local API 入口和手工分享同意回执。
 - v0.6/v0.7 升级来源与持久化/API/Plugin 契约兼容矩阵。

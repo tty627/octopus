@@ -13,7 +13,7 @@ from .plugin_sdk import PLUGIN_API_VERSION
 from .search import SEARCH_SCHEMA_VERSION
 
 COMPATIBILITY_REPORT_SCHEMA_VERSION = "1.0"
-SUPPORTED_IN_PLACE_UPGRADE_SOURCES = ("0.6.0a1", "0.7.0a1")
+SUPPORTED_IN_PLACE_UPGRADE_SOURCES = ("0.6.0a1", "0.7.0a1", "0.8.0b1")
 
 
 class ContractCompatibility(BaseModel):
@@ -105,7 +105,7 @@ def compatibility_report() -> CompatibilityReport:
         ContractCompatibility(
             contract="plugin_api",
             current_version=PLUGIN_API_VERSION,
-            stability="developer_preview",
+            stability="stable",
             rollback_policy="incompatible ranges are disabled before execution",
         ),
         ContractCompatibility(
