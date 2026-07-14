@@ -6,6 +6,10 @@
 
 ### Added
 
+- v0.7 Plugin API v1 Manifest、版本协商、显式权限授予和 `octopus plugin list/inspect/run` CLI。
+- 脱敏的索引查询/时间线能力，以及由宿主复核的文本导出和确认节点复制操作。
+- 独立 Plugin Worker、最小环境、日志脱敏与文件系统/网络/子进程审计边界。
+- 随 wheel 分发的 Package/Timeline 参考 Plugin 和端到端、越权、崩溃隔离回归。
 - v0.6 服务型 Tkinter 桌面端：仓库列表/创建、更新/重试、校验、搜索修复、状态中心和一键打开。
 - 稳定 Local API v1 契约握手、API 仓库创建端点及桌面 HTTP 客户端。
 - 服务/锁/迁移/AI 降级可执行提示、键盘快捷键和 DPI 缩放契约。

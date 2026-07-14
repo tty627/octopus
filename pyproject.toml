@@ -55,6 +55,8 @@ packages = ["src/octopus"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "benchmarks/datasets/search-value-v1.json" = "octopus/data/search-value-v1.json"
+"plugins/package" = "octopus/reference_plugins/package"
+"plugins/timeline" = "octopus/reference_plugins/timeline"
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"

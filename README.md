@@ -5,8 +5,8 @@ without modifying it, writes compact Markdown Leaf and FolderNode indexes to a s
 Repository, and lets people or agents search those indexes without repeatedly opening non-text
 originals.
 
-The current formally tagged version is `0.3.0`; v0.4–v0.6 are closed engineering milestones,
-the active candidate is `0.6.0a1`, and development now targets v0.7. v0.1 and v0.2 are internal
+The current formally tagged version is `0.3.0`; v0.4–v0.7 are closed engineering milestones,
+the active candidate is `0.7.0a1`, and development now targets v0.8. v0.1 and v0.2 are internal
 milestones and have no formal Git release tags.
 
 ## Product and release documentation
@@ -22,6 +22,17 @@ milestones and have no formal Git release tags.
 - [Normative product and file-format specifications](docs/specs/README.md)
 
 The `v1.0.1` under `docs/specs/` is a specification revision, not a software release version.
+
+## v0.7 engineering milestone
+
+- Plugin API v1 manifests, version negotiation and explicit permission grants before execution.
+- Sanitized query/timeline resources; plugins never receive Raw absolute paths or source URIs.
+- Host-proxied text exports and copies limited to search nodes explicitly confirmed for that call.
+- Independent worker processes with minimized environments, bounded/sanitized logs and Python audit
+  guards for filesystem, network and process events.
+- Package and Timeline reference plugins shipped in the wheel and exercised end to end.
+- See the [Plugin SDK v1 developer-preview contract](docs/plugins/PLUGIN_SDK_V1.md). This boundary is
+  not claimed to be a hostile-code operating-system sandbox.
 
 ## v0.6 engineering milestone
 

@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "plugin_id": "octopus.reference.timeline",
+  "name": "Timeline",
+  "version": "1.0.0",
+  "plugin_api": ">=1.0,<2.0",
+  "entrypoint": "plugin.py",
+  "description": "Exports a Markdown timeline from path-sanitized repository signals.",
+  "permissions": [
+    "index.timeline",
+    "export.write"
+  ]
+}

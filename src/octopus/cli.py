@@ -38,6 +38,13 @@ from .evaluation import (
 )
 from .markmap import render_markmap
 from .migrations import apply_migrations, migration_report_markdown, plan_migrations
+from .plugin_sdk import (
+    check_plugin_compatibility,
+    discover_plugins,
+    load_plugin_manifest,
+    reference_plugins_directory,
+    run_plugin,
+)
 from .prompts import PROMPT_VERSION
 from .search import SearchIndex, search_report_markdown
 from .search_evaluation import (
@@ -86,6 +93,7 @@ service_app = typer.Typer(help="Manage the optional Windows SCM service.")
 upgrade_app = typer.Typer(help="Check for Octopus software updates.")
 acceptance_app = typer.Typer(help="Export and summarize local anonymous acceptance records.")
 evaluation_app = typer.Typer(help="Run retrieval evaluation and controlled user studies.")
+plugin_app = typer.Typer(help="Inspect and run isolated Octopus developer-preview plugins.")
 app.add_typer(repo_app, name="repo")
 app.add_typer(watch_app, name="watch")
 app.add_typer(api_app, name="api")
@@ -93,6 +101,7 @@ app.add_typer(service_app, name="service")
 app.add_typer(upgrade_app, name="upgrade")
 app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(evaluation_app, name="evaluate")
+app.add_typer(plugin_app, name="plugin")
 console = Console()
 
 
@@ -108,6 +117,62 @@ def _repository(value: str | None) -> Path:
     except (FileNotFoundError, ValueError) as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(2) from error
+
+
+@plugin_app.command("list")
+def plugin_list(
+    directory: Annotated[Path | None, typer.Option("--directory")] = None,
+) -> None:
+    """List reference or explicitly located plugin manifests without executing them."""
+    plugins = discover_plugins(directory or reference_plugins_directory())
+    console.print_json(json.dumps(plugins, ensure_ascii=False))
+
+
+@plugin_app.command("inspect")
+def plugin_inspect(plugin: Path) -> None:
+    """Validate a plugin manifest and report API compatibility and requested permissions."""
+    try:
+        _, manifest = load_plugin_manifest(plugin)
+        compatibility = check_plugin_compatibility(manifest, set(manifest.permissions))
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Invalid plugin:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(
+        json.dumps(
+            {
+                "manifest": manifest.model_dump(mode="json"),
+                "compatibility": compatibility.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+@plugin_app.command("run")
+def plugin_run(
+    plugin: Path,
+    export: Annotated[Path, typer.Option("--export", help="Authorized empty export directory.")],
+    repository: RepositoryOption = None,
+    query: Annotated[str, typer.Option("--query")] = "",
+    grant: Annotated[list[str] | None, typer.Option("--grant")] = None,
+    confirm: Annotated[
+        list[str] | None, typer.Option("--confirm", help="Confirmed node ID.")
+    ] = None,
+) -> None:
+    """Execute a compatible plugin with explicit least-privilege grants."""
+    try:
+        report = run_plugin(
+            plugin,
+            _repository(repository),
+            export,
+            granted_permissions=set(grant or []),
+            query=query,
+            confirmed_node_ids=set(confirm or []),
+        )
+    except (OSError, PermissionError, RuntimeError, ValueError) as error:
+        console.print(f"[red]Plugin execution failed:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(json.dumps(report.model_dump(mode="json"), ensure_ascii=False))
 
 
 @app.command("version")
@@ -858,3 +923,14 @@ def internal_api_run(
     port: Annotated[int, typer.Option("--port", min=1024, max=65535)] = 8765,
 ) -> None:
     run_api_server(host, port)
+
+
+@app.command("_plugin-worker", hidden=True)
+def internal_plugin_worker(
+    plugin: Annotated[Path, typer.Option("--plugin")],
+    request: Annotated[Path, typer.Option("--request")],
+    response: Annotated[Path, typer.Option("--response")],
+) -> None:
+    from .plugin_worker import run_worker
+
+    run_worker(plugin, request, response)
