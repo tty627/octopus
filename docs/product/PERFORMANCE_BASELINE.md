@@ -94,3 +94,26 @@ v0.3 要求子节点 ID 先去重再按不超过 1,000 个参数分批查询，5
 
 每组至少预热 1 次、测量 5 次，报告 P50/P95 和峰值内存。运行期间禁止网络 AI 调用，且不将构建、依赖安装时间纳入处理耗时。
 每次更新本文档时记录 Git commit/working-tree 状态，避免将不可重现的快照当作发布基线。
+
+## v0.8 工程门槛复测（2026-07-14）
+
+环境仍为上述 Windows 11/NTFS 参考工作站，候选版本 `0.8.0b1`，工作区为提交前 v0.8
+候选。增量命令使用 1 次预热、5 次测量，P50/P95 为 36.43/37.99 ms。
+
+事务命令使用 `--counts 400 800 --repeats 5 --warmups 1 --enforce`：
+
+| 文件数 | P50 总耗时 | P95 总耗时 | 峰值内存 |
+| ---: | ---: | ---: | ---: |
+| 400 | 1,407 ms | 1,567 ms | 1.74 MiB |
+| 800 | 2,922 ms | 3,013 ms | 1.63 MiB |
+
+800 P95 较记录值 2,769 ms 退化 8.83%，仍低于 10% 相对门槛；400→800 比率 2.076
+低于 2.5 绝对门槛。比率相对历史 1.173 的变化已在 v0.8 版本文档中列名批准，未静默
+豁免。门禁命令为：
+
+```powershell
+python -m benchmarks.performance_gate `
+  --baseline benchmarks/baselines/v0.7-release-gates.json `
+  --candidate .octopus-dev/benchmarks/release-gates-v08.json `
+  --approve transaction_growth_ratio --enforce
+```

@@ -33,6 +33,8 @@
 octopus doctor
 octopus validate --format json
 octopus report --last --format markdown
+octopus diagnostics create --repository MyRepository --output .\octopus-diagnostics.zip
 ```
 
-诊断前先复制报告并检查其中不含不希望分享的信息；Octopus 不会自动上传这些文件。
+推荐优先使用脱敏诊断包；其字段范围、显式分享同意和迁移恢复步骤见
+[本地诊断与迁移恢复](DIAGNOSTICS_AND_RECOVERY.md)。Octopus 不会自动上传这些文件。

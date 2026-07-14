@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from octopus.config import load_repository_state
 from octopus.models import NodeState
@@ -64,3 +67,33 @@ def test_force_queues_fresh_file_without_waiting_for_quiet_window(
     assert node.state == NodeState.queued
     assert node.node_id in state.queues.leaf_update
     assert outcome.queued == 1
+
+
+def test_inaccessible_subtree_is_preserved_instead_of_marked_deleted(
+    repository: tuple[Path, Path, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, index, config = repository
+    restricted = raw / "同步盘-暂不可用"
+    restricted.mkdir()
+    (restricted / "保留.txt").write_text("preserve existing identity", encoding="utf-8")
+    state = load_repository_state(index, config)
+    state, _ = RepositoryScanner(config).scan(state, force_path="*")
+    original = next(
+        node for node in state.nodes.values() if node.raw_relative_path.endswith("保留.txt")
+    )
+    real_scandir = os.scandir
+
+    def denied(directory: Path) -> object:
+        if Path(directory).resolve() == restricted.resolve():
+            raise PermissionError("sync placeholder unavailable")
+        return real_scandir(directory)
+
+    monkeypatch.setattr("octopus.scanner.os.scandir", denied)
+    state, outcome = RepositoryScanner(config).scan(state, force_path="*")
+    preserved = state.nodes[original.node_id]
+
+    assert outcome.deleted == 0
+    assert preserved.raw_relative_path.endswith("保留.txt")
+    assert preserved.state == NodeState.pending_edit
+    assert preserved.pending_reason == "scan_access_denied"
+    assert preserved.node_id in state.queues.pending_edit

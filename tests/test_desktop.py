@@ -94,6 +94,15 @@ class FakeDesktopApi:
     def migrations(self) -> dict[str, Any]:
         return {"required": False, "repositories": []}
 
+    def create_diagnostics(
+        self, output_path: str, repository_ids: list[str]
+    ) -> dict[str, Any]:
+        return {
+            "created": True,
+            "file": output_path.rsplit("/", 1)[-1],
+            "repository_ids": repository_ids,
+        }
+
     def job(self, job_id: str) -> dict[str, Any]:
         return self.jobs.pop(0)
 
@@ -114,6 +123,7 @@ def test_desktop_controller_covers_repository_search_and_recovery_workflows() ->
     assert controller.validate()["error_count"] == 0
     assert controller.latest_report()["status"] == "success"  # type: ignore[index]
     assert controller.migrations()["required"] is False
+    assert controller.create_diagnostics("C:/诊断.zip")["created"] is True
     assert controller.wait_for_job("job-1", timeout=1)["status"] == "succeeded"
 
     created = controller.create("C:/资料", "C:/索引", "新仓库")

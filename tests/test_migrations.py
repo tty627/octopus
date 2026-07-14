@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from octopus.config import global_config_path, load_global_config
-from octopus.migrations import apply_migrations, plan_migrations
+from octopus.migrations import apply_migrations, plan_migrations, rollback_migration
 from octopus.utils import atomic_write_json, load_json
 
 
@@ -29,6 +29,8 @@ def test_global_v01_migration_is_planned_backed_up_and_idempotent(
 
     assert not applied.dry_run
     assert Path(applied.targets[0].backup_path).exists()
+    assert applied.targets[0].before_sha256 == applied.targets[0].backup_sha256
+    assert applied.targets[0].after_sha256
     assert load_global_config().schema_version == "0.2"
     assert load_global_config().service.host == "127.0.0.1"
     assert load_global_config().repositories[config.repository.raw_repo_id].enabled
@@ -70,3 +72,43 @@ def test_migration_rolls_back_when_report_commit_fails(
     with pytest.raises(OSError, match="injected report failure"):
         apply_migrations(planned)
     assert load_json(path)["schema_version"] == "0.1"
+
+
+def test_applied_migration_can_be_checksum_verified_and_rolled_back(
+    repository: tuple[Path, Path, object],
+) -> None:
+    _, _, _ = repository
+    path = global_config_path()
+    original = load_json(path)
+    original["schema_version"] = "0.1"
+    original.pop("service", None)
+    atomic_write_json(path, original)
+
+    applied = apply_migrations(plan_migrations([]))
+    rollback = rollback_migration(applied.run_id)
+
+    assert rollback.status == "rolled_back"
+    assert rollback.restored_targets == ["global_config"]
+    assert load_json(path) == original
+    with pytest.raises(ValueError, match="already been rolled back"):
+        rollback_migration(applied.run_id)
+
+
+def test_rollback_refuses_to_overwrite_post_migration_changes(
+    repository: tuple[Path, Path, object],
+) -> None:
+    _, _, _ = repository
+    path = global_config_path()
+    original = load_json(path)
+    original["schema_version"] = "0.1"
+    original.pop("service", None)
+    atomic_write_json(path, original)
+    applied = apply_migrations(plan_migrations([]))
+    changed = load_json(path)
+    changed["active_repository_id"] = "changed-after-migration"
+    atomic_write_json(path, changed)
+
+    with pytest.raises(ValueError, match="changed after migration"):
+        rollback_migration(applied.run_id)
+
+    assert load_json(path) == changed

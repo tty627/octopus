@@ -6,6 +6,10 @@
 
 ### Added
 
+- v0.8 可校验迁移备份、失败自动恢复与 `migrate --rollback RUN_ID` 显式回滚。
+- 默认仅本地的脱敏诊断包、桌面/Local API 入口和手工分享同意回执。
+- v0.6/v0.7 升级来源与持久化/API/Plugin 契约兼容矩阵。
+- 长中文路径、同步盘暂不可读子树保留、源文件权限失败和性能回归审批门禁。
 - v0.7 Plugin API v1 Manifest、版本协商、显式权限授予和 `octopus plugin list/inspect/run` CLI。
 - 脱敏的索引查询/时间线能力，以及由宿主复核的文本导出和确认节点复制操作。
 - 独立 Plugin Worker、最小环境、日志脱敏与文件系统/网络/子进程审计边界。

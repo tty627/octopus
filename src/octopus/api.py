@@ -17,6 +17,7 @@ from .config import (
     load_repository_config,
     load_repository_state,
 )
+from .diagnostics import create_diagnostic_bundle
 from .engine import UpdateEngine
 from .migrations import plan_migrations
 from .models import ServiceJob
@@ -50,6 +51,11 @@ class RepositoryCreateRequest(BaseModel):
     index_path: Path
     name: str | None = Field(default=None, max_length=200)
     build: bool = True
+
+
+class DiagnosticCreateRequest(BaseModel):
+    output_path: Path
+    repository_ids: list[str] = Field(min_length=1, max_length=100)
 
 
 def _repository_path(repository_id: str) -> Path:
@@ -148,6 +154,7 @@ def create_app(
                 "validation",
                 "search_repair",
                 "migration_plan",
+                "local_diagnostics",
             ],
         }
 
@@ -304,6 +311,15 @@ def create_app(
         global_config = load_global_config()
         indexes = [Path(item.index_repository_path) for item in global_config.repositories.values()]
         return plan_migrations(indexes).model_dump(mode="json")
+
+    @app.post("/v1/diagnostics", dependencies=authenticated)
+    def create_diagnostics(request: DiagnosticCreateRequest) -> dict[str, Any]:
+        indexes = [_repository_path(repository_id) for repository_id in request.repository_ids]
+        try:
+            created = create_diagnostic_bundle(request.output_path, indexes)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
+        return {"created": True, "file": created.name, "local_only": True, "uploaded": False}
 
     return app
 

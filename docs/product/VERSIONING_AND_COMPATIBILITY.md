@@ -47,5 +47,6 @@
 ## 历史状态
 
 v0.1 和 v0.2 按已完成的内部里程碑管理，不伪造发布日期或正式发布状态。v0.3 是首个
-正式版本；v0.4 是当前活动开发分支。v0.4 未改变配置、Manifest、Markdown 或搜索
-Schema 版本。
+正式版本；v0.4–v0.8 是工程里程碑。当前活动开发目标为 v0.9 RC。v0.8 未改变配置、
+Manifest、Markdown、Local API 或 Plugin API 版本；详细支持窗口见
+[v0.8 兼容矩阵](COMPATIBILITY_MATRIX.md)。

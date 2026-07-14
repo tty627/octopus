@@ -96,6 +96,20 @@ def test_local_api_auth_repository_search_and_jobs(
         assert latest.status_code == 200
         assert latest.json()["version"] == __version__
         assert TOKEN not in json.dumps(client.get("/v1/jobs", headers=headers).json())
+        diagnostic_path = index.parent / "api-diagnostics.zip"
+        diagnostics = client.post(
+            "/v1/diagnostics",
+            headers=headers,
+            json={"output_path": str(diagnostic_path), "repository_ids": [repository_id]},
+        )
+        assert diagnostics.status_code == 200
+        assert diagnostics.json() == {
+            "created": True,
+            "file": "api-diagnostics.zip",
+            "local_only": True,
+            "uploaded": False,
+        }
+        assert diagnostic_path.exists()
 
 
 def test_api_rejects_invalid_update_flags_and_missing_resources(
@@ -144,6 +158,7 @@ def test_v1_contract_and_repository_creation_workflow(
         contract = client.get("/v1/contract", headers=headers)
         assert contract.status_code == 200
         assert contract.json()["contract_version"] == "1.0"
+        assert "local_diagnostics" in contract.json()["features"]
         created = client.post(
             "/v1/repositories",
             headers=headers,

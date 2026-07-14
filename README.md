@@ -5,8 +5,8 @@ without modifying it, writes compact Markdown Leaf and FolderNode indexes to a s
 Repository, and lets people or agents search those indexes without repeatedly opening non-text
 originals.
 
-The current formally tagged version is `0.3.0`; v0.4–v0.7 are closed engineering milestones,
-the active candidate is `0.7.0a1`, and development now targets v0.8. v0.1 and v0.2 are internal
+The current formally tagged version is `0.3.0`; v0.4–v0.8 are closed engineering milestones,
+the active candidate is `0.8.0b1`, and development now targets v0.9. v0.1 and v0.2 are internal
 milestones and have no formal Git release tags.
 
 ## Product and release documentation
@@ -22,6 +22,18 @@ milestones and have no formal Git release tags.
 - [Normative product and file-format specifications](docs/specs/README.md)
 
 The `v1.0.1` under `docs/specs/` is a specification revision, not a software release version.
+
+## v0.8 engineering milestone
+
+- Checksum-backed schema migration backups, automatic failure recovery and explicit guarded rollback.
+- Local content/path/credential-free diagnostics from CLI, Local API or desktop; manual sharing needs
+  a separate consent receipt and is never automatically uploaded.
+- Machine-readable compatibility matrix for v0.6/v0.7 upgrade sources and every persistent/public
+  contract boundary.
+- Long Unicode path, temporarily inaccessible sync subtree and source permission failure hardening.
+- Absolute and relative performance gates with named approval for any regression over 10%.
+- Real signed-installer upgrades, public-Beta cohorts and a Windows machine matrix were not run and
+  are not claimed in the [v0.8 record](docs/releases/v0.8.md).
 
 ## v0.7 engineering milestone
 

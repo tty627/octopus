@@ -61,6 +61,10 @@ class DesktopApi(Protocol):
 
     def migrations(self) -> dict[str, Any]: ...
 
+    def create_diagnostics(
+        self, output_path: str, repository_ids: list[str]
+    ) -> dict[str, Any]: ...
+
     def job(self, job_id: str) -> dict[str, Any]: ...
 
 
@@ -199,6 +203,18 @@ class LocalApiClient:
     def migrations(self) -> dict[str, Any]:
         return cast(dict[str, Any], self._request("GET", "/v1/migrations"))
 
+    def create_diagnostics(
+        self, output_path: str, repository_ids: list[str]
+    ) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            self._request(
+                "POST",
+                "/v1/diagnostics",
+                {"output_path": output_path, "repository_ids": repository_ids},
+            ),
+        )
+
     def job(self, job_id: str) -> dict[str, Any]:
         return cast(dict[str, Any], self._request("GET", f"/v1/jobs/{job_id}"))
 
@@ -279,6 +295,11 @@ class DesktopController:
 
     def migrations(self) -> dict[str, Any]:
         return self.api.migrations()
+
+    def create_diagnostics(self, output_path: str) -> dict[str, Any]:
+        if not self.selected_repository_id:
+            raise DesktopServiceError("no_repository", "No repository is selected")
+        return self.api.create_diagnostics(output_path, [self.selected_repository_id])
 
     def wait_for_job(
         self,

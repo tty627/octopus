@@ -19,6 +19,7 @@ from rich.table import Table
 
 from . import __version__
 from .activation import export_activation_records, summarize_activation_exports
+from .compatibility import compatibility_report
 from .config import (
     create_repository,
     load_global_config,
@@ -26,6 +27,11 @@ from .config import (
     load_repository_state,
     resolve_repository,
     save_global_config,
+)
+from .diagnostics import (
+    create_diagnostic_bundle,
+    diagnostic_summary,
+    prepare_diagnostic_share,
 )
 from .engine import UpdateEngine
 from .evaluation import (
@@ -37,7 +43,13 @@ from .evaluation import (
     summarize_study,
 )
 from .markmap import render_markmap
-from .migrations import apply_migrations, migration_report_markdown, plan_migrations
+from .migrations import (
+    apply_migrations,
+    migration_report_markdown,
+    migration_rollback_markdown,
+    plan_migrations,
+    rollback_migration,
+)
 from .plugin_sdk import (
     check_plugin_compatibility,
     discover_plugins,
@@ -94,6 +106,7 @@ upgrade_app = typer.Typer(help="Check for Octopus software updates.")
 acceptance_app = typer.Typer(help="Export and summarize local anonymous acceptance records.")
 evaluation_app = typer.Typer(help="Run retrieval evaluation and controlled user studies.")
 plugin_app = typer.Typer(help="Inspect and run isolated Octopus developer-preview plugins.")
+diagnostics_app = typer.Typer(help="Create and inspect local, content-free diagnostic bundles.")
 app.add_typer(repo_app, name="repo")
 app.add_typer(watch_app, name="watch")
 app.add_typer(api_app, name="api")
@@ -102,6 +115,7 @@ app.add_typer(upgrade_app, name="upgrade")
 app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(evaluation_app, name="evaluate")
 app.add_typer(plugin_app, name="plugin")
+app.add_typer(diagnostics_app, name="diagnostics")
 console = Console()
 
 
@@ -117,6 +131,66 @@ def _repository(value: str | None) -> Path:
     except (FileNotFoundError, ValueError) as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(2) from error
+
+
+def _diagnostic_repositories(repository: str | None, all_repositories: bool) -> list[Path]:
+    if all_repositories and repository is not None:
+        raise ValueError("--all and --repository are mutually exclusive")
+    if all_repositories:
+        return [
+            Path(item.index_repository_path)
+            for item in load_global_config().repositories.values()
+            if item.enabled
+        ]
+    return [_repository(repository)]
+
+
+@diagnostics_app.command("create")
+def diagnostics_create(
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    repository: RepositoryOption = None,
+    all_repositories: Annotated[bool, typer.Option("--all")] = False,
+) -> None:
+    """Create a local-only bundle without paths, queries, content, or credentials."""
+    try:
+        indexes = _diagnostic_repositories(repository, all_repositories)
+        created = create_diagnostic_bundle(output, indexes)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Unable to create diagnostics:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(
+        json.dumps({"created": True, "file": created.name, "local_only": True})
+    )
+
+
+@diagnostics_app.command("inspect")
+def diagnostics_inspect(bundle: Path) -> None:
+    """Inspect only the safe counts and consent state of a local diagnostic bundle."""
+    try:
+        summary = diagnostic_summary(bundle)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Invalid diagnostic bundle:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(json.dumps(summary, ensure_ascii=False))
+
+
+@diagnostics_app.command("prepare-share")
+def diagnostics_prepare_share(
+    bundle: Path,
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    consent: Annotated[
+        bool, typer.Option("--consent", help="Record explicit consent for manual sharing.")
+    ] = False,
+) -> None:
+    """Add a consent receipt to a local copy; this command never uploads anything."""
+    try:
+        shared = prepare_diagnostic_share(bundle, output, consent=consent)
+    except (OSError, PermissionError, ValueError) as error:
+        console.print(f"[red]Unable to prepare diagnostic share:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(
+        json.dumps({"prepared": True, "file": shared.name, "uploaded": False})
+    )
 
 
 @plugin_app.command("list")
@@ -179,6 +253,14 @@ def plugin_run(
 def version() -> None:
     """Print the installed Octopus version."""
     console.print(__version__)
+
+
+@app.command("compatibility")
+def compatibility_command() -> None:
+    """Print the current platform, schema, API, plugin, and upgrade support matrix."""
+    console.print_json(
+        json.dumps(compatibility_report().model_dump(mode="json"), ensure_ascii=False)
+    )
 
 
 @acceptance_app.command("export")
@@ -578,9 +660,31 @@ def migrate_command(
     apply: Annotated[
         bool, typer.Option("--apply", help="Back up and apply planned migrations.")
     ] = False,
+    rollback: Annotated[
+        str | None, typer.Option("--rollback", help="Restore an applied migration run ID.")
+    ] = None,
     output_format: Annotated[str, typer.Option("--format", help="markdown or json")] = "markdown",
 ) -> None:
     """Plan or apply schema migrations; dry-run is the default."""
+    if rollback is not None:
+        if apply or all_repositories or repository is not None:
+            console.print(
+                "[red]--rollback cannot be combined with repository or apply options[/red]"
+            )
+            raise typer.Exit(2)
+        try:
+            rolled_back = rollback_migration(rollback)
+        except (OSError, ValueError) as error:
+            console.print(f"[red]Migration rollback failed:[/red] {error}")
+            raise typer.Exit(3) from error
+        if output_format == "json":
+            console.print_json(json.dumps(rolled_back.model_dump(mode="json"), ensure_ascii=False))
+        elif output_format == "markdown":
+            console.print(migration_rollback_markdown(rolled_back))
+        else:
+            console.print("[red]--format must be markdown or json[/red]")
+            raise typer.Exit(2)
+        return
     if all_repositories and repository is not None:
         console.print("[red]--all and --repository are mutually exclusive[/red]")
         raise typer.Exit(2)

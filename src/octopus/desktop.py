@@ -181,6 +181,11 @@ class OctopusDesktop:
             wraplength=680,
         ).pack(anchor="w", fill="x", pady=12)
         ttk.Button(state, text="刷新状态", command=self.refresh).pack(anchor="e")
+        ttk.Button(
+            state,
+            text="保存本地诊断包…",
+            command=self._save_diagnostics,
+        ).pack(anchor="e", pady=(8, 0))
 
     def _bind_keys(self) -> None:
         self.root.bind(
@@ -290,6 +295,33 @@ class OctopusDesktop:
             f"{existing}\n最近运行：{report.get('status', 'unknown')} · "
             f"恢复动作 {len(report.get('recovery_actions', []))} · "
             f"AI 调用 {usage.get('calls', 0)} / token {usage.get('total_tokens', 0)}"
+        )
+
+    def _save_diagnostics(self) -> None:
+        if not self.controller or not self.controller.selected_repository_id:
+            messagebox.showinfo("无可用仓库", "请先选择一个仓库。")
+            return
+        output = filedialog.asksaveasfilename(
+            title="保存本地诊断包",
+            defaultextension=".zip",
+            filetypes=[("ZIP 诊断包", "*.zip")],
+            initialfile="octopus-diagnostics.zip",
+        )
+        if not output:
+            return
+        controller = self.controller
+
+        def saved(result: dict[str, Any]) -> None:
+            messagebox.showinfo(
+                "诊断包已保存",
+                f"已在本地生成 {result.get('file', '诊断包')}。\n"
+                "未上传任何数据；分享前仍需你的明确同意。",
+            )
+
+        self._run(
+            "生成诊断包",
+            lambda: controller.create_diagnostics(output),
+            saved,
         )
 
     def _add_repository(self) -> None:
