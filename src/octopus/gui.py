@@ -610,7 +610,12 @@ def main() -> None:
     root = Tk()
     with suppress(Exception):
         ttk.Style(root).theme_use("vista")
-    OctopusWizard(root)
+    if "--onboarding" in sys.argv:
+        OctopusWizard(root)
+    else:
+        from .desktop import OctopusDesktop
+
+        OctopusDesktop(root)
     root.mainloop()
 
 

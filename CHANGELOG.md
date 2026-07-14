@@ -6,6 +6,9 @@
 
 ### Added
 
+- v0.6 服务型 Tkinter 桌面端：仓库列表/创建、更新/重试、校验、搜索修复、状态中心和一键打开。
+- 稳定 Local API v1 契约握手、API 仓库创建端点及桌面 HTTP 客户端。
+- 服务/锁/迁移/AI 降级可执行提示、键盘快捷键和 DPI 缩放契约。
 - 版本化离线检索评测集与 `octopus evaluate-search --enforce` 工程门禁。
 - 搜索结果的源相对路径、字段级命中证据、解析证据、风险标志和稳定打开 URI。
 - `octopus search --open-result N` 一键打开结果源文件或索引。

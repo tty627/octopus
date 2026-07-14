@@ -5,9 +5,9 @@ without modifying it, writes compact Markdown Leaf and FolderNode indexes to a s
 Repository, and lets people or agents search those indexes without repeatedly opening non-text
 originals.
 
-The current formally tagged version is `0.3.0`; v0.4 is closed as an unsigned internal engineering
-milestone, v0.5 search-value engineering gates pass at `0.5.0a1`, and active development targets
-v0.6. v0.1 and v0.2 are internal milestones and have no formal Git release tags.
+The current formally tagged version is `0.3.0`; v0.4–v0.6 are closed engineering milestones,
+the active candidate is `0.6.0a1`, and development now targets v0.7. v0.1 and v0.2 are internal
+milestones and have no formal Git release tags.
 
 ## Product and release documentation
 
@@ -22,6 +22,16 @@ v0.6. v0.1 and v0.2 are internal milestones and have no formal Git release tags.
 - [Normative product and file-format specifications](docs/specs/README.md)
 
 The `v1.0.1` under `docs/specs/` is a specification revision, not a software release version.
+
+## v0.6 engineering milestone
+
+- Service-backed Tkinter desktop with repository list/create, update/retry, validation, search-cache
+  repair, status center, local/AI-degraded search and source/index opening.
+- Stable loopback [Local API v1 contract](docs/api/LOCAL_API_V1.md) with contract-version handshake,
+  async jobs and repository creation.
+- Actionable service, lock, migration and AI-degradation states; keyboard shortcuts and DPI scaling.
+- The desktop layer contains workflow/presentation logic only; repository mutations remain in the
+  shared API/Engine boundary.
 
 ## v0.5 engineering milestone
 

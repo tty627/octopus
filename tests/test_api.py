@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from octopus import __version__
@@ -124,3 +125,41 @@ def test_repository_listing_marks_invalid_repository_unavailable(
         response = client.get("/v1/repositories", headers={"Authorization": f"Bearer {TOKEN}"})
     assert response.status_code == 200
     assert response.json()[0]["available"] is False
+
+
+def test_v1_contract_and_repository_creation_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    raw = tmp_path / "资料"
+    index = tmp_path / "索引"
+    raw.mkdir()
+    source = raw / "read-only.txt"
+    source.write_text("desktop API workflow", encoding="utf-8")
+    before = source.read_bytes()
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    app = create_app(token=TOKEN, start_scheduler=False)
+
+    with TestClient(app) as client:
+        contract = client.get("/v1/contract", headers=headers)
+        assert contract.status_code == 200
+        assert contract.json()["contract_version"] == "1.0"
+        created = client.post(
+            "/v1/repositories",
+            headers=headers,
+            json={
+                "raw_path": str(raw),
+                "index_path": str(index),
+                "name": "Desktop API",
+                "build": True,
+            },
+        )
+        assert created.status_code == 201, created.text
+        payload = created.json()
+        assert payload["repository"]["name"] == "Desktop API"
+        job = _wait_for_job(client, headers, payload["job"]["job_id"])
+        assert job["status"] == "succeeded"
+        openapi = client.get("/v1/openapi.json", headers=headers).json()
+        assert set(openapi["paths"]["/v1/repositories"]) == {"get", "post"}
+
+    assert source.read_bytes() == before

@@ -11,7 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .config import load_global_config, load_repository_config, load_repository_state
+from .config import (
+    create_repository,
+    load_global_config,
+    load_repository_config,
+    load_repository_state,
+)
 from .engine import UpdateEngine
 from .migrations import plan_migrations
 from .models import ServiceJob
@@ -20,6 +25,8 @@ from .service_control import ensure_service_token
 from .service_runtime import JobManager, RepositoryScheduler
 from .transactions import load_run_report
 from .validation import validate_repository
+
+API_CONTRACT_VERSION = "1.0"
 
 
 class UpdateRequest(BaseModel):
@@ -36,6 +43,13 @@ class SearchRequest(BaseModel):
     mode: Literal["local", "auto"] | None = None
     full: bool | None = None
     limit: int = Field(default=20, ge=1, le=100)
+
+
+class RepositoryCreateRequest(BaseModel):
+    raw_path: Path
+    index_path: Path
+    name: str | None = Field(default=None, max_length=200)
+    build: bool = True
 
 
 def _repository_path(repository_id: str) -> Path:
@@ -116,7 +130,25 @@ def create_app(
             "status": "ok",
             "version": __version__,
             "api_version": "v1",
+            "contract_version": API_CONTRACT_VERSION,
             "bind_policy": "loopback_only",
+        }
+
+    @app.get("/v1/contract", dependencies=authenticated)
+    def contract() -> dict[str, Any]:
+        return {
+            "api_version": "v1",
+            "contract_version": API_CONTRACT_VERSION,
+            "product_version": __version__,
+            "features": [
+                "repository_create",
+                "repository_status",
+                "asynchronous_update",
+                "local_and_degraded_search",
+                "validation",
+                "search_repair",
+                "migration_plan",
+            ],
         }
 
     @app.get("/v1/openapi.json", dependencies=authenticated)
@@ -143,6 +175,41 @@ def create_app(
                 item["available"] = False
             payload.append(item)
         return payload
+
+    @app.post(
+        "/v1/repositories",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=authenticated,
+    )
+    def create_repository_endpoint(request: RepositoryCreateRequest) -> dict[str, Any]:
+        try:
+            config = create_repository(
+                request.raw_path,
+                request.index_path,
+                request.name,
+                ai_enabled=False,
+                require_empty=True,
+            )
+        except (OSError, ValueError) as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from error
+        repository_id = config.repository.raw_repo_id
+        index = Path(config.repository.index_repository_path)
+        job = (
+            jobs.submit(
+                repository_id,
+                "update",
+                lambda: asdict(UpdateEngine(index).run(force_path="*")),
+            )
+            if request.build
+            else None
+        )
+        return {
+            "repository": _repository_payload(repository_id, index),
+            "job": job.model_dump(mode="json") if job else None,
+        }
 
     @app.get("/v1/repositories/{repository_id}", dependencies=authenticated)
     def repository(repository_id: str) -> dict[str, Any]:
