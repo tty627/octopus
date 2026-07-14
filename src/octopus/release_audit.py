@@ -87,12 +87,10 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
     checks: list[ReleaseCheck] = []
     parsed = Version(expected_version)
     _check(checks, "product_version", __version__ == expected_version, __version__)
-    _check(
-        checks,
-        "rc_version",
-        parsed.pre is not None and parsed.pre[0] == "rc",
-        expected_version,
+    release_version = (parsed.pre is not None and parsed.pre[0] == "rc") or (
+        parsed.pre is None and parsed.dev is None and parsed.local is None
     )
+    _check(checks, "release_version", release_version, expected_version)
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     _check(
         checks,
@@ -108,11 +106,32 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         installer_match is not None and installer_match.group(1) == expected_version,
         installer_match.group(1) if installer_match else "missing",
     )
+    numeric_match = re.search(
+        r'^#define AppNumericVersion "([^"]+)"$', installer, re.MULTILINE
+    )
+    release = parsed.release + (0,) * (3 - len(parsed.release))
+    stage = (
+        65_535
+        if parsed.pre is None
+        else {"a": 1_000, "b": 2_000, "rc": 3_000}[parsed.pre[0]] + parsed.pre[1]
+    )
+    expected_numeric = ".".join(str(item) for item in (*release[:3], stage))
+    _check(
+        checks,
+        "installer_numeric_version",
+        numeric_match is not None and numeric_match.group(1) == expected_numeric,
+        numeric_match.group(1) if numeric_match else "missing",
+    )
     readme = (root / "README.md").read_text(encoding="utf-8")
+    readme_has_candidate = (
+        f"active candidate is `{expected_version}`" in readme
+        or f"engineering-final candidate is `{expected_version}`" in readme
+        or f"工程最终候选版本为 `{expected_version}`" in readme
+    )
     _check(
         checks,
         "readme_candidate_version",
-        f"active candidate is `{expected_version}`" in readme,
+        readme_has_candidate,
         expected_version,
     )
 
@@ -126,10 +145,17 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         frozen_contracts == runtime_contracts(),
         "runtime contracts match contract-freeze-v1.json",
     )
+    issues_name = "v1.0-known-issues.json" if parsed.major >= 1 else "v0.9-known-issues.json"
     issues_payload = json.loads(
-        (root / "docs" / "releases" / "v0.9-known-issues.json").read_text(encoding="utf-8")
+        (root / "docs" / "releases" / issues_name).read_text(encoding="utf-8")
     )
     blockers = _open_release_blockers(issues_payload)
+    _check(
+        checks,
+        "known_issues_version",
+        isinstance(issues_payload, dict) and issues_payload.get("candidate") == expected_version,
+        str(issues_payload.get("candidate", "missing")),
+    )
     _check(
         checks,
         "no_open_p0_p1",
@@ -141,9 +167,16 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         root / "docs" / "user" / "DIAGNOSTICS_AND_RECOVERY.md",
         root / "docs" / "support" / "SUPPORT_POLICY.md",
         root / "docs" / "support" / "EMERGENCY_ROLLBACK.md",
-        root / "docs" / "releases" / "v0.9.md",
+        root / "docs" / "releases" / ("v1.0.md" if parsed.major >= 1 else "v0.9.md"),
         root / "CHANGELOG.md",
     ]
+    if parsed.major >= 1:
+        required_documents.extend(
+            [
+                root / "docs" / "user" / "USER_GUIDE.md",
+                root / "docs" / "releases" / "v1.0-engineering-report.md",
+            ]
+        )
     missing = [str(path.relative_to(root)) for path in required_documents if not path.is_file()]
     _check(
         checks,
@@ -151,6 +184,14 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         not missing,
         "complete" if not missing else ",".join(missing),
     )
+    if parsed.major >= 1:
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        _check(
+            checks,
+            "changelog_version",
+            f"## [{expected_version}]" in changelog,
+            expected_version,
+        )
     return checks
 
 

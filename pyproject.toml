@@ -68,9 +68,11 @@ source = ["octopus"]
 omit = [
   "*/octopus/__main__.py",
   "*/octopus/cli.py",
+  "*/octopus/desktop.py",
   "*/octopus/gui.py",
   "*/octopus/markmap.py",
   "*/octopus/parsers.py",
+  "*/octopus/plugin_worker.py",
   "*/octopus/service_control.py",
   "*/octopus/watcher.py",
   "*/octopus/windows_service.py",

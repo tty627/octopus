@@ -15,7 +15,7 @@ def test_all_previous_beta_candidates_are_explicit_upgrade_and_rollback_sources(
 
     assert report.product_version == __version__
     assert report.in_place_upgrade_sources == list(SUPPORTED_IN_PLACE_UPGRADE_SOURCES)
-    assert len(report.upgrade_rehearsals) == 3
+    assert len(report.upgrade_rehearsals) == 4
     assert all(item.supported for item in report.upgrade_rehearsals)
     assert all(item.binary_rollback_safe for item in report.upgrade_rehearsals)
     assert all(not item.persistent_migration_required for item in report.upgrade_rehearsals)

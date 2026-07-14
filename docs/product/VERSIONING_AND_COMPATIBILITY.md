@@ -43,10 +43,12 @@
 - 未知的较新 Schema 必须拒绝写入并给出升级提示；不能将其静默降级。
 - 可重建缓存（如 SQLite）不需数据迁移，但必须在源数据已确认后重建。
 - v1.0 起在同一主版本内保持持久化格式向前兼容；需要破坏性迁移时升级主版本。
+- 1.x 不删除或改变既有持久化字段、Local API v1 响应字段或 Plugin API v1 权限语义；新增
+  字段必须可选。旧版本遇到未知较新持久化 Schema 时必须拒绝写入。
 
 ## 历史状态
 
 v0.1 和 v0.2 按已完成的内部里程碑管理，不伪造发布日期或正式发布状态。v0.3 是首个
-正式版本；v0.4–v0.8 是工程里程碑。当前活动开发目标为 v0.9 RC。v0.8 未改变配置、
-Manifest、Markdown、Local API 或 Plugin API 版本；详细支持窗口见
-[v0.8 兼容矩阵](COMPATIBILITY_MATRIX.md)。
+正式 Tag；v0.4–v0.9 是工程里程碑，`1.0.0` 是工程最终候选。配置、Manifest、Markdown、
+Local API 和 Plugin API 已冻结；详细支持窗口见[兼容矩阵](COMPATIBILITY_MATRIX.md)。在
+正式 Tag、签名和外部发布门槛完成前，不把工程候选描述为已公开 GA。

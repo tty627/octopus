@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+No changes yet.
+
+## [1.0.0] - 2026-07-14 (engineering final; not tagged or publicly released)
+
 ### Added
 
 - v0.9 v1 契约冻结清单、`octopus release-audit` 和版本/阻断/文档/工件一致性检查。
@@ -89,6 +93,7 @@
 - 轮询 Watcher、稳定性状态机、更新日志和 Markmap 输出。
 
 [Unreleased]: https://github.com/tty627/octopus/compare/v0.3.0...HEAD
+[1.0.0]: docs/releases/v1.0.md
 [0.3.0]: docs/releases/v0.3.md
 [0.2.0]: docs/releases/v0.2.md
 [0.1.0]: docs/releases/v0.1.md
