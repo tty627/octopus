@@ -31,4 +31,3 @@ incomplete derived-state recovery causes a full rebuild from Markdown.
 - Search-cache changes never rewrite Raw and require no persistent repository migration.
 - A committed Index remains valid if cache refresh fails; the next search or update rebuilds it.
 - Ranking changes require a new algorithm version and a versioned retrieval report.
-

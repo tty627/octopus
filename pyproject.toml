@@ -34,7 +34,7 @@ dev = [
   "ruff>=0.9,<1",
   "mypy>=1.14,<2",
   "httpx2>=2,<3",
-  "types-pywin32>=311,<312; sys_platform == 'win32'",
+  "types-pywin32>=311,<312",
 ]
 build = [
   "build>=1.2,<2",
@@ -53,19 +53,26 @@ path = "src/octopus/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/octopus"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"benchmarks/datasets/search-value-v1.json" = "octopus/data/search-value-v1.json"
+"plugins/package" = "octopus/reference_plugins/package"
+"plugins/timeline" = "octopus/reference_plugins/timeline"
+
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 
 [tool.coverage.run]
 source = ["octopus"]
 omit = [
   "*/octopus/__main__.py",
   "*/octopus/cli.py",
+  "*/octopus/desktop.py",
   "*/octopus/gui.py",
   "*/octopus/markmap.py",
   "*/octopus/parsers.py",
+  "*/octopus/plugin_worker.py",
   "*/octopus/service_control.py",
   "*/octopus/watcher.py",
   "*/octopus/windows_service.py",

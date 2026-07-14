@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "product_version": "0.7.0a1",
+  "environment": "Windows NTFS reference workstation; see docs/product/PERFORMANCE_BASELINE.md",
+  "metrics": {
+    "transaction_800_p95_ms": 2769.0,
+    "transaction_growth_ratio": 1.173,
+    "incremental_p95_ms": 86.9,
+    "search_top5_rate": 0.9
+  }
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 
@@ -17,10 +18,29 @@ def product_version() -> str:
     return match.group(1)
 
 
-def main() -> None:
-    version = product_version()
-    release = tuple(Version(version).release[:4])
-    numbers = release + (0,) * (4 - len(release))
+def windows_numeric_version(value: str) -> str:
+    """Map a PEP 440 version to a monotonically ordered four-part Windows version."""
+    parsed = Version(value)
+    release = parsed.release + (0,) * (3 - len(parsed.release))
+    major, minor, patch = release[:3]
+    if any(number < 0 or number > 65_535 for number in (major, minor, patch)):
+        raise ValueError(f"Windows version component is out of range: {value}")
+    if parsed.dev is not None:
+        stage = parsed.dev
+        if stage > 999:
+            raise ValueError(f"Development version number is too large: {value}")
+    elif parsed.pre is not None:
+        label, number = parsed.pre
+        if number > 999:
+            raise ValueError(f"Prerelease version number is too large: {value}")
+        stage = {"a": 1_000, "b": 2_000, "rc": 3_000}[label] + number
+    else:
+        stage = 65_535
+    return f"{major}.{minor}.{patch}.{stage}"
+
+
+def write_version_info(version: str) -> None:
+    numbers = tuple(int(part) for part in windows_numeric_version(version).split("."))
     TARGET.parent.mkdir(parents=True, exist_ok=True)
     TARGET.write_text(
         f"""VSVersionInfo(
@@ -52,6 +72,17 @@ def main() -> None:
 """,
         encoding="utf-8",
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--print-numeric", action="store_true")
+    arguments = parser.parse_args()
+    version = product_version()
+    if arguments.print_numeric:
+        print(windows_numeric_version(version))
+        return
+    write_version_info(version)
 
 
 if __name__ == "__main__":

@@ -6,12 +6,32 @@ import pytest
 from typer.testing import CliRunner
 
 from octopus import __version__
-from octopus.cli import app
+from octopus.activation import ActivationSession
+from octopus.cli import _configure_windows_utf8_output, app
 from octopus.engine import UpdateEngine
 from octopus.providers import HeuristicProvider
 from octopus.upgrade import UpgradeCheckResult, UpgradeStatus
 
 runner = CliRunner()
+
+
+def test_windows_cli_reconfigures_text_output_as_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingStream:
+        settings: tuple[str, str] | None = None
+
+        def reconfigure(self, *, encoding: str, errors: str) -> None:
+            self.settings = (encoding, errors)
+
+    stdout = RecordingStream()
+    stderr = RecordingStream()
+    monkeypatch.setattr("octopus.cli.sys.platform", "win32")
+
+    _configure_windows_utf8_output(stdout, stderr)
+
+    assert stdout.settings == ("utf-8", "replace")
+    assert stderr.settings == ("utf-8", "replace")
 
 
 def test_upgrade_check_supports_table_and_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,6 +53,36 @@ def test_upgrade_check_supports_table_and_json(monkeypatch: pytest.MonkeyPatch) 
     assert payload.exit_code == 0
     assert '"status": "update_available"' in payload.stdout
     assert invalid.exit_code == 2
+
+
+def test_acceptance_records_require_explicit_local_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    session = ActivationSession(sample_mode=True)
+    session.stage("opened_result")
+    session.finish("success", file_count=6)
+    exported = tmp_path / "candidate.json"
+
+    export_result = runner.invoke(app, ["acceptance", "export", "--output", str(exported)])
+    summary_result = runner.invoke(
+        app,
+        [
+            "acceptance",
+            "summarize",
+            "--records",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "summary.json"),
+        ],
+    )
+
+    assert export_result.exit_code == 0, export_result.stdout
+    assert exported.exists()
+    assert '"record_count": 1' in export_result.stdout
+    assert summary_result.exit_code == 0, summary_result.stdout
+    assert '"success_count": 1' in summary_result.stdout
+    assert (tmp_path / "summary.json").exists()
 
 
 def test_cli_version_and_repository_lifecycle(
@@ -98,6 +148,27 @@ def test_cli_version_and_repository_lifecycle(
     )
     assert normal_search.exit_code == 0
     assert normal_search.stdout.lstrip().startswith("[")
+    assert '"match_evidence"' in normal_search.stdout
+    assert '"open_target_uri"' in normal_search.stdout
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "octopus.cli.webbrowser.open", lambda target: opened.append(target) or True
+    )
+    open_search = runner.invoke(
+        app,
+        [
+            "search",
+            "CLI Repository",
+            "--repository",
+            str(index),
+            "--open-result",
+            "1",
+        ],
+    )
+    assert open_search.exit_code == 0, open_search.stdout
+    assert opened and opened[0].startswith("file:")
+    assert "Opened result 1" in open_search.stdout
 
     local_report = runner.invoke(
         app,

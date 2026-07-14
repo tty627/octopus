@@ -5,17 +5,21 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 import uuid
+import webbrowser
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Protocol, cast
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .activation import export_activation_records, summarize_activation_exports
+from .compatibility import compatibility_report
 from .config import (
     create_repository,
     load_global_config,
@@ -23,6 +27,11 @@ from .config import (
     load_repository_state,
     resolve_repository,
     save_global_config,
+)
+from .diagnostics import (
+    create_diagnostic_bundle,
+    diagnostic_summary,
+    prepare_diagnostic_share,
 )
 from .engine import UpdateEngine
 from .evaluation import (
@@ -34,9 +43,28 @@ from .evaluation import (
     summarize_study,
 )
 from .markmap import render_markmap
-from .migrations import apply_migrations, migration_report_markdown, plan_migrations
+from .migrations import (
+    apply_migrations,
+    migration_report_markdown,
+    migration_rollback_markdown,
+    plan_migrations,
+    rollback_migration,
+)
+from .plugin_sdk import (
+    check_plugin_compatibility,
+    discover_plugins,
+    load_plugin_manifest,
+    reference_plugins_directory,
+    run_plugin,
+)
 from .prompts import PROMPT_VERSION
+from .release_audit import audit_release
 from .search import SearchIndex, search_report_markdown
+from .search_evaluation import (
+    default_search_evaluation_dataset_path,
+    evaluate_search_dataset,
+    load_search_evaluation_dataset,
+)
 from .service_control import (
     api_status,
     run_api_server,
@@ -46,9 +74,25 @@ from .service_control import (
 )
 from .transactions import load_run_report
 from .upgrade import check_for_upgrade
-from .utils import atomic_write_text
+from .utils import atomic_write_json, atomic_write_text
 from .validation import validate_repository
 from .watcher import run_watch_loop, start_watch, stop_watch, watch_status
+
+
+class _ReconfigureTextStream(Protocol):
+    def __call__(self, *, encoding: str, errors: str) -> None: ...
+
+
+def _configure_windows_utf8_output(*streams: object) -> None:
+    if sys.platform != "win32":
+        return
+    for stream in streams or (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            cast(_ReconfigureTextStream, reconfigure)(encoding="utf-8", errors="replace")
+
+
+_configure_windows_utf8_output()
 
 app = typer.Typer(
     name="octopus",
@@ -60,13 +104,19 @@ watch_app = typer.Typer(help="Manage the polling watcher.")
 api_app = typer.Typer(help="Manage the authenticated loopback Local API.")
 service_app = typer.Typer(help="Manage the optional Windows SCM service.")
 upgrade_app = typer.Typer(help="Check for Octopus software updates.")
+acceptance_app = typer.Typer(help="Export and summarize local anonymous acceptance records.")
 evaluation_app = typer.Typer(help="Run retrieval evaluation and controlled user studies.")
+plugin_app = typer.Typer(help="Inspect and run isolated Octopus developer-preview plugins.")
+diagnostics_app = typer.Typer(help="Create and inspect local, content-free diagnostic bundles.")
 app.add_typer(repo_app, name="repo")
 app.add_typer(watch_app, name="watch")
 app.add_typer(api_app, name="api")
 app.add_typer(service_app, name="service")
 app.add_typer(upgrade_app, name="upgrade")
+app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(evaluation_app, name="evaluate")
+app.add_typer(plugin_app, name="plugin")
+app.add_typer(diagnostics_app, name="diagnostics")
 console = Console()
 
 
@@ -84,10 +134,187 @@ def _repository(value: str | None) -> Path:
         raise typer.Exit(2) from error
 
 
+def _diagnostic_repositories(repository: str | None, all_repositories: bool) -> list[Path]:
+    if all_repositories and repository is not None:
+        raise ValueError("--all and --repository are mutually exclusive")
+    if all_repositories:
+        return [
+            Path(item.index_repository_path)
+            for item in load_global_config().repositories.values()
+            if item.enabled
+        ]
+    return [_repository(repository)]
+
+
+@diagnostics_app.command("create")
+def diagnostics_create(
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    repository: RepositoryOption = None,
+    all_repositories: Annotated[bool, typer.Option("--all")] = False,
+) -> None:
+    """Create a local-only bundle without paths, queries, content, or credentials."""
+    try:
+        indexes = _diagnostic_repositories(repository, all_repositories)
+        created = create_diagnostic_bundle(output, indexes)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Unable to create diagnostics:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(
+        json.dumps({"created": True, "file": created.name, "local_only": True})
+    )
+
+
+@diagnostics_app.command("inspect")
+def diagnostics_inspect(bundle: Path) -> None:
+    """Inspect only the safe counts and consent state of a local diagnostic bundle."""
+    try:
+        summary = diagnostic_summary(bundle)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Invalid diagnostic bundle:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(json.dumps(summary, ensure_ascii=False))
+
+
+@diagnostics_app.command("prepare-share")
+def diagnostics_prepare_share(
+    bundle: Path,
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    consent: Annotated[
+        bool, typer.Option("--consent", help="Record explicit consent for manual sharing.")
+    ] = False,
+) -> None:
+    """Add a consent receipt to a local copy; this command never uploads anything."""
+    try:
+        shared = prepare_diagnostic_share(bundle, output, consent=consent)
+    except (OSError, PermissionError, ValueError) as error:
+        console.print(f"[red]Unable to prepare diagnostic share:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(
+        json.dumps({"prepared": True, "file": shared.name, "uploaded": False})
+    )
+
+
+@plugin_app.command("list")
+def plugin_list(
+    directory: Annotated[Path | None, typer.Option("--directory")] = None,
+) -> None:
+    """List reference or explicitly located plugin manifests without executing them."""
+    plugins = discover_plugins(directory or reference_plugins_directory())
+    console.print_json(json.dumps(plugins, ensure_ascii=False))
+
+
+@plugin_app.command("inspect")
+def plugin_inspect(plugin: Path) -> None:
+    """Validate a plugin manifest and report API compatibility and requested permissions."""
+    try:
+        _, manifest = load_plugin_manifest(plugin)
+        compatibility = check_plugin_compatibility(manifest, set(manifest.permissions))
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Invalid plugin:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(
+        json.dumps(
+            {
+                "manifest": manifest.model_dump(mode="json"),
+                "compatibility": compatibility.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+@plugin_app.command("run")
+def plugin_run(
+    plugin: Path,
+    export: Annotated[Path, typer.Option("--export", help="Authorized empty export directory.")],
+    repository: RepositoryOption = None,
+    query: Annotated[str, typer.Option("--query")] = "",
+    grant: Annotated[list[str] | None, typer.Option("--grant")] = None,
+    confirm: Annotated[
+        list[str] | None, typer.Option("--confirm", help="Confirmed node ID.")
+    ] = None,
+) -> None:
+    """Execute a compatible plugin with explicit least-privilege grants."""
+    try:
+        report = run_plugin(
+            plugin,
+            _repository(repository),
+            export,
+            granted_permissions=set(grant or []),
+            query=query,
+            confirmed_node_ids=set(confirm or []),
+        )
+    except (OSError, PermissionError, RuntimeError, ValueError) as error:
+        console.print(f"[red]Plugin execution failed:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(json.dumps(report.model_dump(mode="json"), ensure_ascii=False))
+
+
 @app.command("version")
 def version() -> None:
     """Print the installed Octopus version."""
     console.print(__version__)
+
+
+@app.command("compatibility")
+def compatibility_command() -> None:
+    """Print the current platform, schema, API, plugin, and upgrade support matrix."""
+    console.print_json(
+        json.dumps(compatibility_report().model_dump(mode="json"), ensure_ascii=False)
+    )
+
+
+@app.command("release-audit")
+def release_audit_command(
+    expected_version: Annotated[str, typer.Option("--expected-version")] = __version__,
+    artifacts: Annotated[Path | None, typer.Option("--artifacts")] = None,
+) -> None:
+    """Audit frozen contracts, blockers, documentation, versions, and optional artifacts."""
+    try:
+        report = audit_release(
+            Path(__file__).resolve().parents[2],
+            expected_version,
+            artifact_directory=artifacts,
+        )
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        console.print(f"[red]Release audit failed:[/red] {error}")
+        raise typer.Exit(4) from error
+    console.print_json(json.dumps(report.model_dump(mode="json"), ensure_ascii=False))
+    if not report.engineering_passed:
+        raise typer.Exit(4)
+
+
+@acceptance_app.command("export")
+def acceptance_export(
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    product_version: Annotated[str, typer.Option("--version")] = __version__,
+) -> None:
+    """Export only the current candidate's anonymous onboarding records."""
+    try:
+        exported = export_activation_records(output, product_version=product_version)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Unable to export acceptance records:[/red] {error}")
+        raise typer.Exit(2) from error
+    console.print_json(json.dumps(exported.model_dump(mode="json"), ensure_ascii=False))
+
+
+@acceptance_app.command("summarize")
+def acceptance_summarize(
+    records: Annotated[list[Path], typer.Option("--records", exists=True)],
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    """Summarize files or directories of one candidate's exports without uploading them."""
+    try:
+        paths: list[Path] = []
+        for path in records:
+            paths.extend(sorted(path.glob("*.json")) if path.is_dir() else [path])
+        summary = summarize_activation_exports(paths)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Unable to summarize acceptance records:[/red] {error}")
+        raise typer.Exit(2) from error
+    if output:
+        atomic_write_json(output, summary.model_dump(mode="json"))
+    console.print_json(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False))
 
 
 @upgrade_app.command("check")
@@ -342,6 +569,42 @@ def rebuild_search(repository: RepositoryOption = None) -> None:
     console.print(f"[green]Indexed {count} Markdown documents.[/green]")
 
 
+@app.command("evaluate-search")
+def evaluate_search(
+    dataset: Annotated[
+        Path | None,
+        typer.Option("--dataset", help="Versioned search evaluation dataset."),
+    ] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", help="Empty directory to preserve generated repositories."),
+    ] = None,
+    enforce: Annotated[
+        bool,
+        typer.Option("--enforce", help="Exit non-zero when engineering thresholds fail."),
+    ] = False,
+) -> None:
+    """Run the deterministic offline v0.5 retrieval and explanation gate."""
+    dataset_path = dataset or default_search_evaluation_dataset_path()
+    try:
+        definition = load_search_evaluation_dataset(dataset_path)
+        if workspace is not None:
+            report = evaluate_search_dataset(definition, workspace)
+        else:
+            with tempfile.TemporaryDirectory(prefix="octopus-search-evaluation-") as temporary:
+                report = evaluate_search_dataset(definition, Path(temporary) / "workspace")
+    except (OSError, RuntimeError, ValueError) as error:
+        console.print(f"[red]Search evaluation failed:[/red] {error}")
+        raise typer.Exit(2) from error
+    payload = report.model_dump(mode="json")
+    if output:
+        atomic_write_json(output, payload)
+    console.print_json(json.dumps(payload, ensure_ascii=False))
+    if enforce and not report.meets_engineering_thresholds:
+        raise typer.Exit(1)
+
+
 @app.command("validate")
 def validate_command(
     repository: RepositoryOption = None,
@@ -418,9 +681,31 @@ def migrate_command(
     apply: Annotated[
         bool, typer.Option("--apply", help="Back up and apply planned migrations.")
     ] = False,
+    rollback: Annotated[
+        str | None, typer.Option("--rollback", help="Restore an applied migration run ID.")
+    ] = None,
     output_format: Annotated[str, typer.Option("--format", help="markdown or json")] = "markdown",
 ) -> None:
     """Plan or apply schema migrations; dry-run is the default."""
+    if rollback is not None:
+        if apply or all_repositories or repository is not None:
+            console.print(
+                "[red]--rollback cannot be combined with repository or apply options[/red]"
+            )
+            raise typer.Exit(2)
+        try:
+            rolled_back = rollback_migration(rollback)
+        except (OSError, ValueError) as error:
+            console.print(f"[red]Migration rollback failed:[/red] {error}")
+            raise typer.Exit(3) from error
+        if output_format == "json":
+            console.print_json(json.dumps(rolled_back.model_dump(mode="json"), ensure_ascii=False))
+        elif output_format == "markdown":
+            console.print(migration_rollback_markdown(rolled_back))
+        else:
+            console.print("[red]--format must be markdown or json[/red]")
+            raise typer.Exit(2)
+        return
     if all_repositories and repository is not None:
         console.print("[red]--all and --repository are mutually exclusive[/red]")
         raise typer.Exit(2)
@@ -589,6 +874,10 @@ def search(
     markmap: Annotated[
         Path | None, typer.Option("--markmap", help="Render an offline HTML mindmap.")
     ] = None,
+    open_result: Annotated[
+        int | None,
+        typer.Option("--open-result", min=1, help="Open the source or index at this rank."),
+    ] = None,
 ) -> None:
     """Search Leaf and FolderNode indexes without reading non-text originals."""
     index = _repository(repository)
@@ -605,10 +894,7 @@ def search(
         raise typer.Exit(2) from error
     if output_format == "json":
         value = json.dumps(
-            [
-                item.model_dump(mode="json", exclude={"matched_terms", "match_reasons"})
-                for item in results
-            ],
+            [item.model_dump(mode="json") for item in results],
             ensure_ascii=False,
             indent=2,
         )
@@ -624,6 +910,15 @@ def search(
         console.print(f"Wrote {output}")
     else:
         console.print(value)
+    if open_result is not None:
+        if open_result > len(results):
+            console.print(f"[red]Result rank {open_result} does not exist.[/red]")
+            raise typer.Exit(2)
+        target = results[open_result - 1].open_target_uri
+        if not target or not webbrowser.open(target):
+            console.print(f"[red]Unable to open result {open_result}.[/red]")
+            raise typer.Exit(6)
+        console.print(f"[green]Opened result {open_result}.[/green]")
     if markmap:
         markdown_path = (
             output if output_format == "markdown" and output else markmap.with_suffix(".md")
@@ -753,3 +1048,14 @@ def internal_api_run(
     port: Annotated[int, typer.Option("--port", min=1024, max=65535)] = 8765,
 ) -> None:
     run_api_server(host, port)
+
+
+@app.command("_plugin-worker", hidden=True)
+def internal_plugin_worker(
+    plugin: Annotated[Path, typer.Option("--plugin")],
+    request: Annotated[Path, typer.Option("--request")],
+    response: Annotated[Path, typer.Option("--response")],
+) -> None:
+    from .plugin_worker import run_worker
+
+    run_worker(plugin, request, response)

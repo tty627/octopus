@@ -5,6 +5,7 @@ import queue
 import sys
 import threading
 import webbrowser
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from tkinter import (
@@ -20,7 +21,7 @@ from tkinter import (
     messagebox,
     ttk,
 )
-from typing import Any
+from typing import Any, cast
 
 from .activation import ActivationSession
 from .config import create_repository
@@ -31,6 +32,19 @@ from .progress import CancellationToken, UpdateCancelledError
 from .sample_data import SAMPLE_SEARCH_TASKS, default_sample_paths, materialize_sample_repository
 from .search import SearchIndex
 from .upgrade import UpgradeCheckResult, UpgradeStatus, check_for_upgrade
+
+
+def _open_path(path: str | os.PathLike[str]) -> None:
+    """Open a path with Explorer without exposing a platform-only os attribute to mypy."""
+    if sys.platform != "win32":
+        raise RuntimeError("Opening paths from the desktop app is supported only on Windows")
+    startfile = cast(
+        Callable[[str | os.PathLike[str]], None] | None,
+        getattr(os, "startfile", None),
+    )
+    if startfile is None:
+        raise RuntimeError("Windows path opener is unavailable")
+    startfile(path)
 
 PHASE_LABELS = {
     UpdatePhase.preparing: "正在准备",
@@ -523,7 +537,7 @@ class OctopusWizard:
     def _open_index(self) -> None:
         result = self._selected()
         if result:
-            os.startfile(result.index_path)
+            _open_path(result.index_path)
             self._record_result_opened()
 
     def _open_recommended(self) -> None:
@@ -533,7 +547,7 @@ class OctopusWizard:
         if result.recommended_open_target == "source" and result.source_uri:
             webbrowser.open(result.source_uri)
         else:
-            os.startfile(result.index_path)
+            _open_path(result.index_path)
         self._record_result_opened()
 
     def _open_source(self) -> None:
@@ -552,7 +566,7 @@ class OctopusWizard:
 
     def _open_index_directory(self) -> None:
         if self.index_path:
-            os.startfile(self.index_path)
+            _open_path(self.index_path)
 
     def _show_error(self, error: Exception) -> None:
         code = classify_onboarding_error(error).value
@@ -596,7 +610,12 @@ def main() -> None:
     root = Tk()
     with suppress(Exception):
         ttk.Style(root).theme_use("vista")
-    OctopusWizard(root)
+    if "--onboarding" in sys.argv:
+        OctopusWizard(root)
+    else:
+        from .desktop import OctopusDesktop
+
+        OctopusDesktop(root)
     root.mainloop()
 
 

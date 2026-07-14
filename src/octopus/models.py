@@ -376,15 +376,24 @@ class SearchDocument(OctopusModel):
     truncated: bool = False
 
 
+class SearchMatchEvidence(OctopusModel):
+    field: Literal["name", "path", "summary", "keywords", "evidence", "body"]
+    locator: str
+    excerpt: str
+    matched_terms: list[str] = Field(default_factory=list)
+
+
 class SearchResult(SearchDocument):
     rank: int = Field(default=0, ge=0)
     score: float = 0.0
     matched_terms: list[str] = Field(default_factory=list)
     matched_fields: list[str] = Field(default_factory=list)
     match_reasons: list[str] = Field(default_factory=list)
+    match_evidence: list[SearchMatchEvidence] = Field(default_factory=list)
     explanation: str = ""
     risk_flags: list[str] = Field(default_factory=list)
     recommended_open_target: Literal["index", "source"] = "index"
+    open_target_uri: str = ""
 
 
 class SearchCitation(OctopusModel):

@@ -16,6 +16,7 @@ from .models import (
     GeneratedSearchAnswer,
     SearchCitation,
     SearchDocument,
+    SearchMatchEvidence,
     SearchReport,
     SearchResult,
 )
@@ -36,9 +37,18 @@ LATIN_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
 CITATION_MARKER = re.compile(r"\[S(\d+)\]")
 SQLITE_ID_BATCH_SIZE = 1_000
-SEARCH_SCHEMA_VERSION = "0.4"
-SEARCH_ALGORITHM_VERSION = "octopus-0.5-local-v1"
+SEARCH_SCHEMA_VERSION = "0.5"
+SEARCH_ALGORITHM_VERSION = "octopus-0.5-local-v2-explain"
 SEARCH_REPORT_SCHEMA_VERSION = "1.0"
+SearchField = Literal["name", "path", "summary", "keywords", "evidence", "body"]
+MATCH_FIELD_LOCATORS: dict[SearchField, str] = {
+    "name": "summary_layer.name",
+    "path": "source.raw_relative_path",
+    "summary": "summary_layer.one_sentence_summary",
+    "keywords": "summary_layer.tags_and_keywords",
+    "evidence": "attachment_card_layer.extraction_evidence",
+    "body": "markdown_index.body",
+}
 
 ALLOWED_STATUSES = (
     "clean",
@@ -108,6 +118,19 @@ def _valid_node_ids(node_ids: list[str], allowed: dict[str, SearchResult]) -> li
         if node_id in allowed and node_id not in valid:
             valid.append(node_id)
     return valid
+
+
+def _evidence_excerpt(text: str, matched_terms: list[str], limit: int = 240) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    folded = compact.casefold()
+    offsets = [folded.find(term.casefold()) for term in matched_terms]
+    first = min((offset for offset in offsets if offset >= 0), default=0)
+    start = max(0, first - limit // 3)
+    end = min(len(compact), start + limit)
+    start = max(0, end - limit)
+    return ("…" if start else "") + compact[start:end] + ("…" if end < len(compact) else "")
 
 
 def _evidence(payload: object) -> list[ExtractionEvidence]:
@@ -484,7 +507,7 @@ class SearchIndex:
         results: list[SearchResult] = []
         for row in rows:
             document = self._row_document(row)
-            fields = {
+            fields: dict[SearchField, str] = {
                 "name": document.name,
                 "path": document.raw_relative_path,
                 "summary": document.summary + " " + document.description,
@@ -498,6 +521,7 @@ class SearchIndex:
             coverage = len(matched) / max(1, len(query_terms))
             reasons: list[str] = []
             matched_fields: list[str] = []
+            match_evidence: list[SearchMatchEvidence] = []
             score = -float(row["fts_rank"]) + coverage * 4.0
             if normalized_query and normalized_query in document.name.casefold():
                 reasons.append("exact_name")
@@ -508,7 +532,7 @@ class SearchIndex:
             if normalized_query and normalized_query in document.summary.casefold():
                 reasons.append("exact_summary")
                 score += 5.0
-            field_reasons = {
+            field_reasons: dict[SearchField, tuple[str, float]] = {
                 "name": ("name_term_match", 5.0),
                 "path": ("path_term_match", 3.5),
                 "summary": ("summary_term_match", 3.0),
@@ -517,13 +541,20 @@ class SearchIndex:
                 "body": ("body_match", 1.0),
             }
             for field_name, (reason, weight) in field_reasons.items():
-                field_coverage = len(query_terms & field_terms[field_name]) / max(
-                    1, len(query_terms)
-                )
+                field_matches = sorted(query_terms & field_terms[field_name])
+                field_coverage = len(field_matches) / max(1, len(query_terms))
                 if field_coverage:
                     matched_fields.append(field_name)
                     reasons.append(reason)
                     score += field_coverage * weight
+                    match_evidence.append(
+                        SearchMatchEvidence(
+                            field=field_name,
+                            locator=MATCH_FIELD_LOCATORS[field_name],
+                            excerpt=_evidence_excerpt(fields[field_name], field_matches),
+                            matched_terms=field_matches,
+                        )
+                    )
             if coverage == 1.0:
                 reasons.append("all_terms_matched")
                 score += 1.0
@@ -534,17 +565,31 @@ class SearchIndex:
             if document.status not in {"clean", "indexed"}:
                 risk_flags.append(f"status:{document.status}")
                 score -= STATUS_PENALTIES.get(document.status, 2.0)
+            if document.status == "stale":
+                risk_flags.append("stale_index")
             for flag in document.quality_flags:
                 risk_flags.append(f"quality:{flag}")
             score -= min(2.0, len(document.quality_flags) * 0.5)
             if document.truncated:
                 risk_flags.append("truncated")
                 score -= 1.5
+            if not document.source_uri:
+                risk_flags.append("missing_source_uri")
+            if document.index_type == "foldernode":
+                risk_flags.append("folder_aggregate")
             unique_reasons = list(dict.fromkeys(reasons))
             explanation = "；".join(
                 REASON_LABELS[reason]
                 for reason in unique_reasons
                 if reason in REASON_LABELS
+            )
+            recommended_open_target: Literal["index", "source"] = (
+                "source" if document.index_type == "text" else "index"
+            )
+            open_target_uri = (
+                document.source_uri
+                if recommended_open_target == "source" and document.source_uri
+                else Path(document.index_path).resolve().as_uri()
             )
             results.append(
                 SearchResult(
@@ -553,11 +598,11 @@ class SearchIndex:
                     matched_terms=matched,
                     matched_fields=matched_fields,
                     match_reasons=unique_reasons,
+                    match_evidence=match_evidence,
                     explanation=explanation,
                     risk_flags=risk_flags,
-                    recommended_open_target=(
-                        "source" if document.index_type == "text" else "index"
-                    ),
+                    recommended_open_target=recommended_open_target,
+                    open_target_uri=open_target_uri,
                 )
             )
         results.sort(key=lambda item: (-item.score, item.name.casefold(), item.node_id))
@@ -598,6 +643,9 @@ class SearchIndex:
                     )
             for row in rows:
                 document = self._row_document(row)
+                recommended_open_target: Literal["index", "source"] = (
+                    "source" if document.index_type == "text" else "index"
+                )
                 results.append(
                     SearchResult(
                         **document.model_dump(),
@@ -608,8 +656,11 @@ class SearchIndex:
                             if document.status in {"clean", "indexed"}
                             else [f"status:{document.status}"]
                         ),
-                        recommended_open_target=(
-                            "source" if document.index_type == "text" else "index"
+                        recommended_open_target=recommended_open_target,
+                        open_target_uri=(
+                            document.source_uri
+                            if recommended_open_target == "source" and document.source_uri
+                            else Path(document.index_path).resolve().as_uri()
                         ),
                     )
                 )
@@ -849,13 +900,16 @@ def results_markdown(
         lines.append("- 未找到匹配的索引。")
         return "\n".join(lines) + "\n"
     for result in results:
-        target_uri = (
+        index_uri = Path(result.index_path).resolve().as_uri()
+        target_uri = result.open_target_uri or (
             result.source_uri
             if result.recommended_open_target == "source" and result.source_uri
-            else Path(result.index_path).resolve().as_uri()
+            else index_uri
         )
         status = f" · 状态：{result.status}" if result.status != "clean" else ""
-        lines.append(f"- {result.rank}. [{result.name}]({target_uri}){status}")
+        lines.append(
+            f"- {result.rank}. [{result.name}]({index_uri}){status} · [打开]({target_uri})"
+        )
         if result.summary:
             lines.append(f"  - {result.summary}")
         if result.explanation:
@@ -868,6 +922,9 @@ def results_markdown(
         if result.risk_flags:
             lines.append(f"  - 风险：{', '.join(result.risk_flags)}")
         lines.append(f"  - 类型：{result.index_type}")
+        if result.match_evidence:
+            evidence = result.match_evidence[0]
+            lines.append(f"  - 命中证据：`{evidence.locator}` · {evidence.excerpt}")
     return "\n".join(lines) + "\n"
 
 

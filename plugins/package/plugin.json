@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "plugin_id": "octopus.reference.package",
+  "name": "Package",
+  "version": "1.0.0",
+  "plugin_api": ">=1.0,<2.0",
+  "entrypoint": "plugin.py",
+  "description": "Exports a manifest and host-verified copies of explicitly confirmed search results.",
+  "permissions": [
+    "index.query",
+    "export.write",
+    "export.copy_confirmed"
+  ]
+}

@@ -100,8 +100,9 @@ class RepositoryScanner:
         outcome: ScanOutcome,
         progress_callback: ProgressCallback | None = None,
         cancellation_token: CancellationToken | None = None,
-    ) -> dict[str, ScanEntry]:
+    ) -> tuple[dict[str, ScanEntry], set[str]]:
         entries: dict[str, ScanEntry] = {}
+        inaccessible_prefixes: set[str] = set()
 
         def visit(directory: Path) -> None:
             if cancellation_token:
@@ -109,6 +110,7 @@ class RepositoryScanner:
             try:
                 children = sorted(os.scandir(directory), key=lambda item: item.name.casefold())
             except (OSError, PermissionError):
+                inaccessible_prefixes.add(directory.relative_to(self.raw).as_posix().removeprefix("."))
                 return
             lock_targets = {
                 item.name[2:]
@@ -124,6 +126,7 @@ class RepositoryScanner:
                     is_directory = child.is_dir(follow_symlinks=False)
                 except OSError:
                     outcome.ignored += 1
+                    inaccessible_prefixes.add(relative)
                     continue
                 if self._is_ignored(relative, child.name, is_directory):
                     outcome.ignored += 1
@@ -146,6 +149,7 @@ class RepositoryScanner:
                     )
                 except (OSError, PermissionError):
                     outcome.ignored += 1
+                    inaccessible_prefixes.add(relative)
                     continue
                 signals: list[str] = []
                 if child.name in lock_targets:
@@ -184,7 +188,7 @@ class RepositoryScanner:
                     percent=20.0,
                 )
             )
-        return entries
+        return entries, inaccessible_prefixes
 
     def scan(
         self,
@@ -198,7 +202,9 @@ class RepositoryScanner:
         state.repository.last_scan_started_at = utc_now()
         state.scan.scan_generation += 1
         state.queues = QueueState()
-        entries = self._entries(outcome, progress_callback, cancellation_token)
+        entries, inaccessible_prefixes = self._entries(
+            outcome, progress_callback, cancellation_token
+        )
         old_by_path = {record.raw_relative_path: record for record in state.nodes.values()}
         now = datetime.now(UTC)
         quiet_threshold = now - timedelta(seconds=self.config.stability.minimum_quiet_seconds)
@@ -305,7 +311,29 @@ class RepositoryScanner:
                     outcome.pending += 1
             records_by_path[relative] = node
 
-        deleted_records = [record for path, record in old_by_path.items() if path not in entries]
+        def inaccessible(path: str) -> bool:
+            return any(
+                not prefix or path == prefix or path.startswith(prefix.rstrip("/") + "/")
+                for prefix in inaccessible_prefixes
+            )
+
+        for path, old in old_by_path.items():
+            if path in entries or not inaccessible(path):
+                continue
+            node = old.model_copy(deep=True)
+            node.previous_state = node.state
+            node.state = NodeState.pending_edit
+            node.pending_reason = "scan_access_denied"
+            node.stability.editing_signals = ["scan_access_denied"]
+            records_by_path[path] = node
+            state.queues.pending_edit.append(node.node_id)
+            outcome.pending += 1
+
+        deleted_records = [
+            record
+            for path, record in old_by_path.items()
+            if path not in entries and not inaccessible(path)
+        ]
         new_file_records = [
             records_by_path[path]
             for path in new_paths

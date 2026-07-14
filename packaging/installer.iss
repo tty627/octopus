@@ -1,5 +1,8 @@
 #ifndef AppVersion
-  #define AppVersion "0.4.0.dev0"
+#define AppVersion "1.0.0"
+#endif
+#ifndef AppNumericVersion
+#define AppNumericVersion "1.0.0.65535"
 #endif
 
 [Setup]
@@ -26,9 +29,10 @@ CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
 UninstallDisplayIcon={app}\Octopus.exe
-VersionInfoVersion=0.4.0.0
+VersionInfoVersion={#AppNumericVersion}
 VersionInfoProductName=Octopus
-VersionInfoProductVersion={#AppVersion}
+VersionInfoProductVersion={#AppNumericVersion}
+VersionInfoProductTextVersion={#AppVersion}
 #ifdef SignedBuild
 SignTool=OctopusSign
 SignedUninstaller=yes
@@ -56,6 +60,6 @@ Filename: "{app}\octopus-cli.exe"; Parameters: "api stop"; Flags: runhidden skip
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
-    MsgBox('Octopus 已卸载。您的资料、索引与 %APPDATA%\Octopus 配置均已保留。',
-      mbInformation, MB_OK);
+    SuppressibleMsgBox('Octopus 已卸载。您的资料、索引与 %APPDATA%\Octopus 配置均已保留。',
+      mbInformation, MB_OK, IDOK);
 end;

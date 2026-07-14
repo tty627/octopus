@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "candidate": "0.9.0rc1",
+  "issues": [
+    {
+      "id": "OCT-RC-001",
+      "severity": "P2",
+      "status": "accepted",
+      "title": "Plugin Worker is a developer extension boundary, not an OS hostile-code sandbox",
+      "mitigation": "Only bundled or user-reviewed local plugins are supported; unknown remote code is never auto-executed."
+    }
+  ]
+}

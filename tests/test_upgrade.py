@@ -5,7 +5,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 
+from octopus import __version__
 from octopus.runtime import octopus_command
 from octopus.upgrade import UpgradeStatus, check_for_upgrade, upgrade_cache_path
 
@@ -15,14 +17,16 @@ def test_upgrade_check_validates_release_and_uses_daily_cache(
 ) -> None:
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     calls = 0
+    current = Version(__version__)
+    newer = f"{current.major}.{current.minor + 1}.0"
 
     def release(timeout: float) -> object:
         nonlocal calls
         calls += 1
         assert timeout == 3.0
         return {
-            "tag_name": "v0.4.0",
-            "html_url": "https://github.com/tty627/octopus/releases/tag/v0.4.0",
+            "tag_name": f"v{newer}",
+            "html_url": f"https://github.com/tty627/octopus/releases/tag/v{newer}",
             "body": "Windows offline installer and onboarding wizard.",
         }
 

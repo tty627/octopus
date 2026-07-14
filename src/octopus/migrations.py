@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -23,6 +25,9 @@ class MigrationTarget(OctopusModel):
     to_version: str
     changes: list[str] = Field(default_factory=list)
     backup_path: str = ""
+    before_sha256: str = ""
+    after_sha256: str = ""
+    backup_sha256: str = ""
 
 
 class MigrationReport(OctopusModel):
@@ -35,6 +40,27 @@ class MigrationReport(OctopusModel):
     @property
     def required(self) -> bool:
         return bool(self.targets)
+
+
+class MigrationRollbackReport(OctopusModel):
+    run_id: str
+    rolled_back_at: str = Field(default_factory=utc_now)
+    restored_targets: list[MigrationKind] = Field(default_factory=list)
+    status: Literal["rolled_back"] = "rolled_back"
+
+
+def _migration_directory(run_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{32}", run_id):
+        raise ValueError("Invalid migration run ID")
+    return global_config_path().parent / "migrations" / run_id
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:
@@ -131,13 +157,19 @@ def apply_migrations(report: MigrationReport) -> MigrationReport:
         if backup.exists():
             raise FileExistsError(f"Migration backup already exists: {backup}")
         target.backup_path = str(backup)
+        target.before_sha256 = _file_sha256(path)
         prepared.append((target, path, backup, _migrate_payload(target, payload)))
     for _, path, backup, _ in prepared:
         shutil.copy2(path, backup)
-    report_path = global_config_path().parent / "migrations" / applied.run_id / "report.json"
+    for target, _, backup, _ in prepared:
+        target.backup_sha256 = _file_sha256(backup)
+        if target.backup_sha256 != target.before_sha256:
+            raise OSError("Migration backup checksum mismatch")
+    report_path = _migration_directory(applied.run_id) / "report.json"
     try:
-        for _, path, _, migrated_payload in prepared:
+        for target, path, _, migrated_payload in prepared:
             atomic_write_json(path, migrated_payload)
+            target.after_sha256 = _file_sha256(path)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(report_path, applied.model_dump(mode="json"))
     except Exception:
@@ -147,6 +179,76 @@ def apply_migrations(report: MigrationReport) -> MigrationReport:
         report_path.unlink(missing_ok=True)
         raise
     return applied
+
+
+def _allowed_rollback_path(target: MigrationTarget) -> Path:
+    path = Path(target.path).resolve()
+    if target.kind == "global_config":
+        if path != global_config_path().resolve():
+            raise ValueError("Migration report contains an unexpected global config path")
+        return path
+    filename = {
+        "repository_config": "repository-config.json",
+        "repository_state": "repository-state.json",
+    }[target.kind]
+    repositories = GlobalConfig.model_validate(
+        load_json(global_config_path(), {})
+    ).repositories.values()
+    registered = {
+        (Path(item.index_repository_path).resolve() / ".octopus" / filename).resolve()
+        for item in repositories
+    }
+    if path not in registered:
+        raise ValueError("Migration report contains an unregistered repository path")
+    return path
+
+
+def rollback_migration(run_id: str) -> MigrationRollbackReport:
+    directory = _migration_directory(run_id)
+    report_path = directory / "report.json"
+    rollback_path = directory / "rollback.json"
+    if rollback_path.exists():
+        raise ValueError("Migration has already been rolled back")
+    payload = load_json(report_path)
+    if not isinstance(payload, dict):
+        raise FileNotFoundError(f"Applied migration report is unavailable: {run_id}")
+    report = MigrationReport.model_validate(payload)
+    if report.dry_run or not report.targets:
+        raise ValueError("Only an applied migration can be rolled back")
+
+    prepared: list[tuple[MigrationTarget, Path, dict[str, Any], dict[str, Any]]] = []
+    for target in report.targets:
+        path = _allowed_rollback_path(target)
+        backup = Path(target.backup_path).resolve()
+        expected_backup = directory / path.name
+        if backup != expected_backup.resolve() or not backup.is_file():
+            raise ValueError("Migration backup is missing or outside its run directory")
+        if not target.backup_sha256 or _file_sha256(backup) != target.backup_sha256:
+            raise ValueError("Migration backup checksum mismatch")
+        if not path.is_file() or not target.after_sha256:
+            raise ValueError("Migrated target is unavailable or has no committed checksum")
+        if _file_sha256(path) != target.after_sha256:
+            raise ValueError("Migrated target changed after migration; refusing to overwrite it")
+        current = load_json(path)
+        original = load_json(backup)
+        if not isinstance(current, dict) or not isinstance(original, dict):
+            raise ValueError("Migration rollback target is not a JSON object")
+        prepared.append((target, path, current, original))
+
+    rollback = MigrationRollbackReport(run_id=run_id)
+    try:
+        for target, path, _, original in reversed(prepared):
+            atomic_write_json(path, original)
+            if _file_sha256(path) != target.before_sha256:
+                raise OSError("Restored migration target checksum mismatch")
+            rollback.restored_targets.append(target.kind)
+        atomic_write_json(rollback_path, rollback.model_dump(mode="json"))
+    except Exception:
+        for _, path, current, _ in prepared:
+            atomic_write_json(path, current)
+        rollback_path.unlink(missing_ok=True)
+        raise
+    return rollback
 
 
 def migration_report_markdown(report: MigrationReport) -> str:
@@ -166,4 +268,15 @@ def migration_report_markdown(report: MigrationReport) -> str:
         lines.extend(f"- change: {change}" for change in target.changes)
         if target.backup_path:
             lines.append(f"- backup: `{target.backup_path}`")
+    return "\n".join(lines) + "\n"
+
+
+def migration_rollback_markdown(report: MigrationRollbackReport) -> str:
+    lines = [
+        f"# Octopus Migration Rollback {report.run_id}",
+        "",
+        f"- status: {report.status}",
+        f"- restored targets: {len(report.restored_targets)}",
+    ]
+    lines.extend(f"- restored: `{kind}`" for kind in report.restored_targets)
     return "\n".join(lines) + "\n"

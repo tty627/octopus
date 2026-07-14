@@ -27,5 +27,7 @@ def repository(
 
 
 @pytest.fixture(autouse=True)
-def clean_python_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def clean_python_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     monkeypatch.delenv("PYTHONINSPECT", raising=False)

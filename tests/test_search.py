@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from docx import Document
 from PIL import Image
 
 from octopus.engine import UpdateEngine
@@ -38,14 +39,26 @@ def test_chinese_and_english_analyzer() -> None:
 
 def test_search_database_is_rebuildable(repository: tuple[Path, Path, object]) -> None:
     raw, index, _ = repository
-    (raw / "需求说明.txt").write_text("Octopus 项目需求和 Python API 设计", encoding="utf-8")
+    source = raw / "需求说明.docx"
+    document = Document()
+    document.add_paragraph("Octopus 项目需求和 Python API 设计")
+    document.save(source)
+    UpdateEngine(index).run(force_path="*")
     UpdateEngine(index).run(force_path="*")
     search = SearchIndex(index)
     results = search.search("项目需求")
     assert results
     assert any("Test Repository" in item.name for item in results)
+    assert results[0].match_evidence
+    assert results[0].open_target_uri.startswith("file:")
+    leaf_result = next(
+        item for item in search.search("需求说明.docx") if item.index_type == "leaf"
+    )
+    assert leaf_result.raw_relative_path == "需求说明.docx"
     markdown = results_markdown("项目需求", results)
     assert "file:///" in markdown
+    assert "推荐原因" in markdown
+    assert "命中证据" in markdown
     search.database.unlink()
     assert search.search("Python API")
 
@@ -253,6 +266,7 @@ def test_field_weighting_prefers_exact_filename_and_cache_auto_migrates(
     results = search.search("alpha-project.png")
     assert results[0].name == "alpha-project.png"
     assert "exact_name" in results[0].match_reasons
+    assert any(item.field == "name" for item in results[0].match_evidence)
     with closing(sqlite3.connect(search.database)) as connection:
         connection.execute("DROP TABLE search_metadata")
         connection.commit()

@@ -10,10 +10,15 @@ python -m benchmarks.generate_dataset D:\Octopus-Bench-100k --count 100000 --mod
 Run release gates without network AI calls:
 
 ```powershell
+octopus evaluate-search --output .octopus-dev\benchmarks\search-value.json --enforce
 python -m benchmarks.benchmark_transactions --counts 400 800 --repeats 5 --warmups 1 --enforce
 python -m benchmarks.benchmark_incremental --repeats 5 --warmups 1 --enforce
 python -m benchmarks.benchmark_retrieval --enforce
 ```
+
+The versioned `datasets/search-value-v1.json` corpus covers Chinese/English DOCX and XLSX,
+same-name files and a stale-index task. The wheel packages the same file as the default dataset for
+`octopus evaluate-search`; use `--dataset` only to evaluate a separately versioned corpus.
 
 Use `--output .octopus-dev\benchmarks\<name>.json` to preserve machine-readable results. Record
 CPU, memory, disk and Git working-tree state alongside any result used for a release decision.

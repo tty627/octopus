@@ -4,8 +4,29 @@
 
 ## [Unreleased]
 
+No changes yet.
+
+## [1.0.0] - 2026-07-14 (engineering final; not tagged or publicly released)
+
 ### Added
 
+- v0.9 v1 契约冻结清单、`octopus release-audit` 和版本/阻断/文档/工件一致性检查。
+- 机器可读 P0/P1 登记、支持分级/角色政策与紧急回滚手册。
+- wheel/sdist 工程 RC Build Manifest 与 SHA256SUMS 独立审计链路。
+- v0.8 可校验迁移备份、失败自动恢复与 `migrate --rollback RUN_ID` 显式回滚。
+- 默认仅本地的脱敏诊断包、桌面/Local API 入口和手工分享同意回执。
+- v0.6/v0.7 升级来源与持久化/API/Plugin 契约兼容矩阵。
+- 长中文路径、同步盘暂不可读子树保留、源文件权限失败和性能回归审批门禁。
+- v0.7 Plugin API v1 Manifest、版本协商、显式权限授予和 `octopus plugin list/inspect/run` CLI。
+- 脱敏的索引查询/时间线能力，以及由宿主复核的文本导出和确认节点复制操作。
+- 独立 Plugin Worker、最小环境、日志脱敏与文件系统/网络/子进程审计边界。
+- 随 wheel 分发的 Package/Timeline 参考 Plugin 和端到端、越权、崩溃隔离回归。
+- v0.6 服务型 Tkinter 桌面端：仓库列表/创建、更新/重试、校验、搜索修复、状态中心和一键打开。
+- 稳定 Local API v1 契约握手、API 仓库创建端点及桌面 HTTP 客户端。
+- 服务/锁/迁移/AI 降级可执行提示、键盘快捷键和 DPI 缩放契约。
+- 版本化离线检索评测集与 `octopus evaluate-search --enforce` 工程门禁。
+- 搜索结果的源相对路径、字段级命中证据、解析证据、风险标志和稳定打开 URI。
+- `octopus search --open-result N` 一键打开结果源文件或索引。
 - v0.5 工程先行的统一可解释 `SearchReport`、纯文本文件结果、证据/风险与推荐打开目标。
 - 版本化 60 任务中英检索集、Top-5/MRR 评测器及匿名反平衡用户研究记录/汇总工具。
 - 简体中文 Tkinter 首次运行向导、六格式确定性示例资料和前五条本地搜索结果。
@@ -14,9 +35,11 @@
 - `octopus upgrade check --format table|json` 与 GUI 24 小时缓存的 GitHub 稳定版检查。
 - PyInstaller 6.21 共享 onedir、Inno Setup 6.7.3 每用户离线安装器及受保护签名 CI。
 - 只记录阶段时间、结果、错误码和计数的本地匿名首次体验报告。
+- `octopus acceptance export/summarize` 本地显式导出与多参与者匿名验收汇总。
 
 ### Changed
 
+- 搜索派生库 Schema 升至 `0.5`，旧缓存自动重建；CLI/API JSON 返回完整解释契约。
 - 搜索缓存按提交事务增量刷新并绑定 Manifest generation；AI 不可用或无有效证据时自动降级到本地结果。
 - 向导创建的仓库默认关闭 AI，首次流程固定为 0 次 AI 调用。
 - 仓库初始化先持久化本地配置/状态，再注册全局配置；失败仅清理本次 Octopus 文件。
@@ -27,6 +50,7 @@
 
 - 升级检查只接受固定 `tty627/octopus` GitHub Release 路径，3 秒超时且失败不阻断。
 - 发布脚本要求主程序、CLI、卸载器和安装器通过 SHA-256 Authenticode 与 RFC 3161 时间戳。
+- Windows 打包工作流校验 Tag/代码/文件版本一致，并自动验证静默安装、卸载、重装和数据保留。
 
 ## [0.3.0] - 2026-07-13
 
@@ -69,6 +93,7 @@
 - 轮询 Watcher、稳定性状态机、更新日志和 Markmap 输出。
 
 [Unreleased]: https://github.com/tty627/octopus/compare/v0.3.0...HEAD
+[1.0.0]: docs/releases/v1.0.md
 [0.3.0]: docs/releases/v0.3.md
 [0.2.0]: docs/releases/v0.2.md
 [0.1.0]: docs/releases/v0.1.md
