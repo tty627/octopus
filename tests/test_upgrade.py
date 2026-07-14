@@ -21,8 +21,8 @@ def test_upgrade_check_validates_release_and_uses_daily_cache(
         calls += 1
         assert timeout == 3.0
         return {
-            "tag_name": "v0.4.0",
-            "html_url": "https://github.com/tty627/octopus/releases/tag/v0.4.0",
+            "tag_name": "v0.6.0",
+            "html_url": "https://github.com/tty627/octopus/releases/tag/v0.6.0",
             "body": "Windows offline installer and onboarding wizard.",
         }
 

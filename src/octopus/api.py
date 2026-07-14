@@ -201,7 +201,7 @@ def create_app(
                 mode="json"
             )
         return [
-            result.model_dump(mode="json", exclude={"matched_terms", "match_reasons"})
+            result.model_dump(mode="json")
             for result in search_index.search(request.query, request.limit)
         ]
 

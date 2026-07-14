@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import sys
+import tempfile
+import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Protocol, cast
@@ -28,6 +30,11 @@ from .markmap import render_markmap
 from .migrations import apply_migrations, migration_report_markdown, plan_migrations
 from .prompts import PROMPT_VERSION
 from .search import SearchIndex, results_markdown, search_report_markdown
+from .search_evaluation import (
+    default_search_evaluation_dataset_path,
+    evaluate_search_dataset,
+    load_search_evaluation_dataset,
+)
 from .service_control import (
     api_status,
     run_api_server,
@@ -382,6 +389,42 @@ def rebuild_search(repository: RepositoryOption = None) -> None:
     console.print(f"[green]Indexed {count} Markdown documents.[/green]")
 
 
+@app.command("evaluate-search")
+def evaluate_search(
+    dataset: Annotated[
+        Path | None,
+        typer.Option("--dataset", help="Versioned search evaluation dataset."),
+    ] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", help="Empty directory to preserve generated repositories."),
+    ] = None,
+    enforce: Annotated[
+        bool,
+        typer.Option("--enforce", help="Exit non-zero when engineering thresholds fail."),
+    ] = False,
+) -> None:
+    """Run the deterministic offline v0.5 retrieval and explanation gate."""
+    dataset_path = dataset or default_search_evaluation_dataset_path()
+    try:
+        definition = load_search_evaluation_dataset(dataset_path)
+        if workspace is not None:
+            report = evaluate_search_dataset(definition, workspace)
+        else:
+            with tempfile.TemporaryDirectory(prefix="octopus-search-evaluation-") as temporary:
+                report = evaluate_search_dataset(definition, Path(temporary) / "workspace")
+    except (OSError, RuntimeError, ValueError) as error:
+        console.print(f"[red]Search evaluation failed:[/red] {error}")
+        raise typer.Exit(2) from error
+    payload = report.model_dump(mode="json")
+    if output:
+        atomic_write_json(output, payload)
+    console.print_json(json.dumps(payload, ensure_ascii=False))
+    if enforce and not report.meets_engineering_thresholds:
+        raise typer.Exit(1)
+
+
 @app.command("validate")
 def validate_command(
     repository: RepositoryOption = None,
@@ -626,6 +669,10 @@ def search(
     markmap: Annotated[
         Path | None, typer.Option("--markmap", help="Render an offline HTML mindmap.")
     ] = None,
+    open_result: Annotated[
+        int | None,
+        typer.Option("--open-result", min=1, help="Open the source or index at this rank."),
+    ] = None,
 ) -> None:
     """Search Leaf and FolderNode indexes without reading non-text originals."""
     index = _repository(repository)
@@ -638,10 +685,7 @@ def search(
         raise typer.Exit(4 if full else 2) from error
     if output_format == "json":
         value = json.dumps(
-            [
-                item.model_dump(mode="json", exclude={"matched_terms", "match_reasons"})
-                for item in results
-            ],
+            [item.model_dump(mode="json") for item in results],
             ensure_ascii=False,
             indent=2,
         )
@@ -664,6 +708,15 @@ def search(
         console.print(f"Wrote {output}")
     else:
         console.print(value)
+    if open_result is not None:
+        if open_result > len(results):
+            console.print(f"[red]Result rank {open_result} does not exist.[/red]")
+            raise typer.Exit(2)
+        target = results[open_result - 1].open_target_uri
+        if not target or not webbrowser.open(target):
+            console.print(f"[red]Unable to open result {open_result}.[/red]")
+            raise typer.Exit(6)
+        console.print(f"[green]Opened result {open_result}.[/green]")
     if markmap:
         markdown_path = (
             output if output_format == "markdown" and output else markmap.with_suffix(".md")

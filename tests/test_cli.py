@@ -148,6 +148,27 @@ def test_cli_version_and_repository_lifecycle(
     )
     assert normal_search.exit_code == 0
     assert normal_search.stdout.lstrip().startswith("[")
+    assert '"match_evidence"' in normal_search.stdout
+    assert '"open_target_uri"' in normal_search.stdout
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "octopus.cli.webbrowser.open", lambda target: opened.append(target) or True
+    )
+    open_search = runner.invoke(
+        app,
+        [
+            "search",
+            "CLI Repository",
+            "--repository",
+            str(index),
+            "--open-result",
+            "1",
+        ],
+    )
+    assert open_search.exit_code == 0, open_search.stdout
+    assert opened and opened[0].startswith("file:")
+    assert "Opened result 1" in open_search.stdout
 
     monkeypatch.setattr(
         "octopus.search.create_provider", lambda config, require_network: HeuristicProvider()

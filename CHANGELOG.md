@@ -6,6 +6,9 @@
 
 ### Added
 
+- 版本化离线检索评测集与 `octopus evaluate-search --enforce` 工程门禁。
+- 搜索结果的源相对路径、字段级命中证据、解析证据、风险标志和稳定打开 URI。
+- `octopus search --open-result N` 一键打开结果源文件或索引。
 - 简体中文 Tkinter 首次运行向导、六格式确定性示例资料和前五条本地搜索结果。
 - 只读 `RepositoryEstimate` 预检、版本化 Windows 时间/空间系数和稳定错误码。
 - `UpdateProgress`、线程安全 `CancellationToken`、提交前事务回滚及 cancelled RunReport。
@@ -16,6 +19,7 @@
 
 ### Changed
 
+- 搜索派生库 Schema 升至 `0.5`，旧缓存自动重建；CLI/API JSON 返回完整解释契约。
 - 向导创建的仓库默认关闭 AI，首次流程固定为 0 次 AI 调用。
 - 仓库初始化先持久化本地配置/状态，再注册全局配置；失败仅清理本次 Octopus 文件。
 - watcher/API 子进程命令在冻结环境中复用当前 CLI 可执行文件。

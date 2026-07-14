@@ -53,6 +53,9 @@ path = "src/octopus/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/octopus"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"benchmarks/datasets/search-value-v1.json" = "octopus/data/search-value-v1.json"
+
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
 testpaths = ["tests"]

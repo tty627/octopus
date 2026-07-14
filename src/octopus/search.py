@@ -5,12 +5,15 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from typing import Literal
 
 from .config import load_repository_config, octopus_dir
 from .models import (
+    ExtractionEvidence,
     GeneratedSearchAnswer,
     SearchCitation,
     SearchDocument,
+    SearchMatchEvidence,
     SearchReport,
     SearchResult,
 )
@@ -21,7 +24,17 @@ LATIN_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
 CITATION_MARKER = re.compile(r"\[S(\d+)\]")
 SQLITE_ID_BATCH_SIZE = 1_000
-SEARCH_SCHEMA_VERSION = "0.3"
+SEARCH_SCHEMA_VERSION = "0.5"
+SEARCH_ALGORITHM_VERSION = "fts5-bm25-explain-v1"
+SearchField = Literal["name", "summary", "description", "tags", "keywords", "body"]
+MATCH_FIELD_LOCATORS: dict[SearchField, str] = {
+    "name": "summary_layer.name",
+    "summary": "summary_layer.one_sentence_summary",
+    "description": "summary_layer.description",
+    "tags": "summary_layer.tag_rough",
+    "keywords": "summary_layer.topic_keywords",
+    "body": "markdown_index.body",
+}
 
 
 def analyze_terms(text: str) -> list[str]:
@@ -57,6 +70,19 @@ def _valid_node_ids(node_ids: list[str], allowed: dict[str, SearchResult]) -> li
     return valid
 
 
+def _evidence_excerpt(text: str, matched_terms: list[str], limit: int = 240) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    folded = compact.casefold()
+    offsets = [folded.find(term.casefold()) for term in matched_terms]
+    first = min((offset for offset in offsets if offset >= 0), default=0)
+    start = max(0, first - limit // 3)
+    end = min(len(compact), start + limit)
+    start = max(0, end - limit)
+    return ("…" if start else "") + compact[start:end] + ("…" if end < len(compact) else "")
+
+
 class SearchIndex:
     def __init__(self, index_repository: Path) -> None:
         self.index = index_repository.resolve()
@@ -89,13 +115,18 @@ class SearchIndex:
                 metadata = card.get("metadata", {})
                 node_id = source.get("source_id", "")
                 source_uri = metadata.get("file_uri", "")
+                source_relative_path = source.get("raw_relative_path", "")
+                extraction_evidence = card.get("extraction_evidence", [])
             else:
                 card = header.get("folder_card_layer", {})
                 source = card.get("source", {})
                 node_id = source.get("folder_id", "")
                 source_uri = card.get("metadata", {}).get("folder_uri", "")
+                source_relative_path = source.get("raw_relative_path", "")
+                extraction_evidence = []
             if not node_id:
                 continue
+            extraction_policy = header.get("extraction_policy", {})
             documents.append(
                 SearchDocument(
                     node_id=node_id,
@@ -109,6 +140,9 @@ class SearchIndex:
                     body_excerpt=body[:8_000],
                     status=update.get("index_status", "clean"),
                     source_uri=source_uri,
+                    source_relative_path=source_relative_path,
+                    extraction_evidence=extraction_evidence,
+                    truncated=bool(extraction_policy.get("truncated", False)),
                 )
             )
         return documents
@@ -145,7 +179,10 @@ class SearchIndex:
                     keywords_json TEXT NOT NULL,
                     body_excerpt TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    source_uri TEXT NOT NULL
+                    source_uri TEXT NOT NULL,
+                    source_relative_path TEXT NOT NULL,
+                    extraction_evidence_json TEXT NOT NULL,
+                    truncated INTEGER NOT NULL
                 );
                 CREATE VIRTUAL TABLE document_fts USING fts5(
                     node_id UNINDEXED,
@@ -163,7 +200,7 @@ class SearchIndex:
             )
             for document in documents:
                 connection.execute(
-                    "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         document.node_id,
                         document.index_type,
@@ -176,6 +213,12 @@ class SearchIndex:
                         document.body_excerpt,
                         document.status,
                         document.source_uri,
+                        document.source_relative_path,
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in document.extraction_evidence],
+                            ensure_ascii=False,
+                        ),
+                        int(document.truncated),
                     ),
                 )
                 connection.execute(
@@ -217,34 +260,59 @@ class SearchIndex:
         normalized_query = query.casefold().strip()
         results: list[SearchResult] = []
         for row in rows:
-            combined = " ".join(
-                [
-                    row["name"],
-                    row["summary"],
-                    row["description"],
-                    " ".join(json.loads(row["tags_json"])),
-                    " ".join(json.loads(row["keywords_json"])),
-                    row["body_excerpt"],
-                ]
-            )
+            tags = json.loads(row["tags_json"])
+            keywords = json.loads(row["keywords_json"])
+            fields: dict[SearchField, str] = {
+                "name": row["name"],
+                "summary": row["summary"],
+                "description": row["description"],
+                "tags": " ".join(tags),
+                "keywords": " ".join(keywords),
+                "body": row["body_excerpt"],
+            }
+            combined = " ".join(fields.values())
             document_terms = set(analyze_terms(combined))
             matched = sorted(query_terms & document_terms)
             coverage = len(matched) / max(1, len(query_terms))
             reasons: list[str] = []
+            match_evidence: list[SearchMatchEvidence] = []
+            for field, value in fields.items():
+                field_matches = sorted(query_terms & set(analyze_terms(value)))
+                if not field_matches:
+                    continue
+                reasons.append(f"{field}_term_match")
+                match_evidence.append(
+                    SearchMatchEvidence(
+                        field=field,
+                        locator=MATCH_FIELD_LOCATORS[field],
+                        excerpt=_evidence_excerpt(value, field_matches),
+                        matched_terms=field_matches,
+                    )
+                )
             boost = coverage * 3.0
             if normalized_query and normalized_query in row["name"].casefold():
-                reasons.append("exact_name")
+                reasons.insert(0, "exact_name")
                 boost += 8.0
             if normalized_query and normalized_query in row["summary"].casefold():
-                reasons.append("exact_summary")
+                reasons.insert(0, "exact_summary")
                 boost += 5.0
             name_terms = set(analyze_terms(row["name"]))
             name_coverage = len(query_terms & name_terms) / max(1, len(query_terms))
             if name_coverage:
-                reasons.append("name_term_match")
                 boost += name_coverage * 4.0
             if coverage == 1.0:
                 reasons.append("all_terms_matched")
+            risk_flags: list[str] = []
+            if row["status"] == "stale":
+                risk_flags.append("stale_index")
+            if bool(row["truncated"]):
+                risk_flags.append("truncated_extraction")
+            if not row["source_uri"]:
+                risk_flags.append("missing_source_uri")
+            if coverage < 1.0:
+                risk_flags.append("partial_query_match")
+            if row["index_type"] == "foldernode":
+                risk_flags.append("folder_aggregate")
             results.append(
                 SearchResult(
                     node_id=row["node_id"],
@@ -253,14 +321,24 @@ class SearchIndex:
                     name=row["name"],
                     summary=row["summary"],
                     description=row["description"],
-                    tags=json.loads(row["tags_json"]),
-                    keywords=json.loads(row["keywords_json"]),
+                    tags=tags,
+                    keywords=keywords,
                     body_excerpt=row["body_excerpt"],
                     status=row["status"],
                     source_uri=row["source_uri"],
+                    source_relative_path=row["source_relative_path"],
+                    extraction_evidence=[
+                        ExtractionEvidence.model_validate(item)
+                        for item in json.loads(row["extraction_evidence_json"])
+                    ],
+                    truncated=bool(row["truncated"]),
                     score=-float(row["rank"]) + boost,
                     matched_terms=matched,
-                    match_reasons=reasons,
+                    match_reasons=list(dict.fromkeys(reasons)),
+                    match_evidence=match_evidence,
+                    risk_flags=risk_flags,
+                    open_target_uri=row["source_uri"]
+                    or Path(row["index_path"]).resolve().as_uri(),
                 )
             )
         results.sort(key=lambda item: (-item.score, item.name.casefold(), item.node_id))
@@ -311,7 +389,17 @@ class SearchIndex:
                         body_excerpt=row["body_excerpt"],
                         status=row["status"],
                         source_uri=row["source_uri"],
+                        source_relative_path=row["source_relative_path"],
+                        extraction_evidence=[
+                            ExtractionEvidence.model_validate(item)
+                            for item in json.loads(row["extraction_evidence_json"])
+                        ],
+                        truncated=bool(row["truncated"]),
                         score=0.0,
+                        match_reasons=["folder_expansion_context"],
+                        risk_flags=["folder_expansion_context"],
+                        open_target_uri=row["source_uri"]
+                        or Path(row["index_path"]).resolve().as_uri(),
                     )
                 )
         return results
@@ -407,10 +495,18 @@ def results_markdown(
     for result in results:
         index_uri = Path(result.index_path).resolve().as_uri()
         status = f" · 状态：{result.status}" if result.status != "clean" else ""
-        lines.append(f"- [{result.name}]({index_uri}){status}")
+        open_uri = result.open_target_uri or index_uri
+        lines.append(f"- [{result.name}]({index_uri}){status} · [打开]({open_uri})")
         if result.summary:
             lines.append(f"  - {result.summary}")
         lines.append(f"  - 类型：{result.index_type}")
+        if result.match_reasons:
+            lines.append(f"  - 推荐原因：{', '.join(result.match_reasons)}")
+        if result.match_evidence:
+            evidence = result.match_evidence[0]
+            lines.append(f"  - 命中证据：`{evidence.locator}` · {evidence.excerpt}")
+        if result.risk_flags:
+            lines.append(f"  - 风险：{', '.join(result.risk_flags)}")
     return "\n".join(lines) + "\n"
 
 

@@ -70,6 +70,9 @@ def test_local_api_auth_repository_search_and_jobs(
         )
         assert search.status_code == 200
         assert search.json()
+        assert search.json()[0]["match_reasons"]
+        assert search.json()[0]["match_evidence"]
+        assert search.json()[0]["open_target_uri"].startswith("file:")
         validation = client.post(f"/v1/repositories/{repository_id}/validate", headers=headers)
         assert validation.status_code == 200
         assert validation.json()["error_count"] == 0

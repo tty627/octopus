@@ -1,0 +1,190 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "octopus-search-value",
+  "dataset_version": "1.0.0",
+  "required_categories": [
+    "chinese",
+    "english",
+    "text",
+    "non_text",
+    "same_name",
+    "stale"
+  ],
+  "documents": [
+    {
+      "path": "项目/需求说明.docx",
+      "format": "docx",
+      "title": "海王星计划需求说明",
+      "content": [
+        "海王星计划建设离线知识库，核心要求包括权限审计、可追溯引用和本地优先。",
+        "验收关键词：NEPTUNE-RBAC-204，所有打开动作必须指向原始文件。"
+      ]
+    },
+    {
+      "path": "项目/架构设计.docx",
+      "format": "docx",
+      "title": "Octopus Local API Architecture",
+      "content": [
+        "The loopback Local API uses bearer authentication and binds to 127.0.0.1 only.",
+        "Clients must preserve stable JSON contracts and explicit error codes."
+      ]
+    },
+    {
+      "path": "财务/预算明细.xlsx",
+      "format": "xlsx",
+      "title": "预算明细",
+      "content": [
+        "项目|季度|预算|负责人",
+        "星云项目|Q4|875000|林岚",
+        "海王星计划|Q3|420000|周宁"
+      ]
+    },
+    {
+      "path": "财务/成本分析.docx",
+      "format": "docx",
+      "title": "采购成本分析",
+      "content": [
+        "主要成本来自服务器采购和长期对象存储，年度上限为 530000。",
+        "本文不包含星云项目 Q4 预算审批信息。"
+      ]
+    },
+    {
+      "path": "客户/北辰/会议纪要.docx",
+      "format": "docx",
+      "title": "北辰客户会议纪要",
+      "content": [
+        "北辰客户要求在检索结果中提供一键打开与命中证据。",
+        "代号 POLARIS-OPEN，交付负责人为苏禾。"
+      ]
+    },
+    {
+      "path": "客户/南星/会议纪要.docx",
+      "format": "docx",
+      "title": "南星客户会议纪要",
+      "content": [
+        "The Southern Star customer requires bilingual retrieval and spreadsheet evidence.",
+        "Project code SOUTHSTAR-BILINGUAL; owner: Mira."
+      ]
+    },
+    {
+      "path": "运维/故障手册.docx",
+      "format": "docx",
+      "title": "故障 OCP-417 处理手册",
+      "content": [
+        "OCP-417 表示搜索缓存版本不匹配。先重建 FTS5 缓存，再执行只读验证。",
+        "不要删除原始仓库。"
+      ]
+    },
+    {
+      "path": "运维/恢复清单.xlsx",
+      "format": "xlsx",
+      "title": "Recovery Checklist",
+      "content": [
+        "Step|Action|Expected",
+        "1|verify manifest backup|checksum matches",
+        "2|rollback transaction journal|repository returns clean",
+        "3|rebuild search cache|schema version current"
+      ]
+    },
+    {
+      "path": "合规/数据保留.docx",
+      "format": "docx",
+      "title": "数据保留与删除政策",
+      "content": [
+        "审计记录保留七年，删除请求须在三十日内完成并留下审批链。",
+        "策略编号 COMPLIANCE-RETENTION-7Y。"
+      ],
+      "stale": true
+    },
+    {
+      "path": "research/vector-notes.docx",
+      "format": "docx",
+      "title": "Hybrid Retrieval Notes",
+      "content": [
+        "Reciprocal rank fusion combines lexical and vector candidates without requiring score calibration.",
+        "The offline baseline remains FTS5 BM25 for deterministic evaluation."
+      ]
+    },
+    {
+      "path": "research/ranking.xlsx",
+      "format": "xlsx",
+      "title": "Ranking Metrics",
+      "content": [
+        "Metric|Meaning|Gate",
+        "Top-5|relevant result in first five|0.80",
+        "MRR|mean reciprocal rank|0.65"
+      ]
+    },
+    {
+      "path": "归档/旧需求.docx",
+      "format": "docx",
+      "title": "旧版需求归档",
+      "content": [
+        "旧系统只支持按文件名浏览，不提供解释证据或稳定 API。",
+        "该方案已经归档，不用于当前版本。"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "zh-neptune-policy",
+      "query": "海王星 权限审计 NEPTUNE-RBAC-204",
+      "relevant_paths": ["项目/需求说明.docx"],
+      "categories": ["chinese", "text"]
+    },
+    {
+      "task_id": "en-loopback-auth",
+      "query": "loopback bearer authentication",
+      "relevant_paths": ["项目/架构设计.docx"],
+      "categories": ["english", "text"]
+    },
+    {
+      "task_id": "xlsx-budget-value",
+      "query": "星云项目 Q4 875000",
+      "relevant_paths": ["财务/预算明细.xlsx"],
+      "categories": ["chinese", "non_text"]
+    },
+    {
+      "task_id": "same-name-north",
+      "query": "北辰 POLARIS-OPEN 一键打开",
+      "relevant_paths": ["客户/北辰/会议纪要.docx"],
+      "categories": ["chinese", "same_name", "text"]
+    },
+    {
+      "task_id": "same-name-south",
+      "query": "Southern Star bilingual retrieval SOUTHSTAR-BILINGUAL",
+      "relevant_paths": ["客户/南星/会议纪要.docx"],
+      "categories": ["english", "same_name", "text"]
+    },
+    {
+      "task_id": "error-code-runbook",
+      "query": "OCP-417 FTS5 cache mismatch",
+      "relevant_paths": ["运维/故障手册.docx"],
+      "categories": ["chinese", "english", "text"]
+    },
+    {
+      "task_id": "xlsx-rollback",
+      "query": "rollback transaction journal checksum",
+      "relevant_paths": ["运维/恢复清单.xlsx"],
+      "categories": ["english", "non_text"]
+    },
+    {
+      "task_id": "stale-retention",
+      "query": "审计记录保留七年 COMPLIANCE-RETENTION-7Y",
+      "relevant_paths": ["合规/数据保留.docx"],
+      "categories": ["chinese", "stale", "text"]
+    },
+    {
+      "task_id": "en-reciprocal-fusion",
+      "query": "reciprocal rank fusion score calibration",
+      "relevant_paths": ["research/vector-notes.docx"],
+      "categories": ["english", "text"]
+    },
+    {
+      "task_id": "xlsx-ranking-metrics",
+      "query": "Top-5 MRR 0.65",
+      "relevant_paths": ["research/ranking.xlsx"],
+      "categories": ["english", "non_text"]
+    }
+  ]
+}

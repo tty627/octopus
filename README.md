@@ -5,14 +5,16 @@ without modifying it, writes compact Markdown Leaf and FolderNode indexes to a s
 Repository, and lets people or agents search those indexes without repeatedly opening non-text
 originals.
 
-The current released version is `0.3.0`; the v0.4 release line is preparing the controlled
-`0.4.0a1` candidate. v0.1 and v0.2 are internal milestones and have no formal Git release tags.
+The current formally tagged version is `0.3.0`; v0.4 is closed as an unsigned internal engineering
+milestone, v0.5 search-value engineering gates pass at `0.5.0a1`, and active development targets
+v0.6. v0.1 and v0.2 are internal milestones and have no formal Git release tags.
 
 ## Product and release documentation
 
 - [Product evolution specification](<docs/product/Octopus产品版本迭代总规范.md>)
 - [Roadmap](docs/product/ROADMAP.md), [metrics](docs/product/METRICS.md), and
-  [performance baseline](docs/product/PERFORMANCE_BASELINE.md)
+  [performance](docs/product/PERFORMANCE_BASELINE.md) / [search](docs/product/SEARCH_EVALUATION_BASELINE.md)
+  baselines
 - [Versioning, branches, and compatibility](docs/product/VERSIONING_AND_COMPATIBILITY.md)
 - [Release plans and milestone records](docs/releases/) and [changelog](CHANGELOG.md)
 - [Windows installation](docs/user/WINDOWS_INSTALLATION.md) and
@@ -21,7 +23,17 @@ The current released version is `0.3.0`; the v0.4 release line is preparing the 
 
 The `v1.0.1` under `docs/specs/` is a specification revision, not a software release version.
 
-## v0.4 candidate capabilities
+## v0.5 engineering milestone
+
+- Versioned offline Chinese/English DOCX/XLSX search tasks covering duplicate names and stale data.
+- Field-level match excerpts, extraction evidence, source-relative paths, risk flags and stable open
+  targets in CLI and Local API JSON.
+- `octopus evaluate-search --enforce` for Top-5, MRR, task-failure, inspection-step and explanation
+  contract gates without an API key.
+- `octopus search --open-result N` for opening the selected source or index target.
+- Disposable search schema `0.5` automatically rebuilds from existing Markdown indexes.
+
+## v0.4 capabilities
 
 - Simplified-Chinese Tkinter first-run wizard with a deterministic six-format sample repository.
 - Read-only file, format, time, disk and AI-call preflight; wizard repositories always start with
@@ -32,8 +44,8 @@ The `v1.0.1` under `docs/specs/` is a specification revision, not a software rel
 - Cached, non-blocking GitHub stable-release checks through GUI and `octopus upgrade check`.
 - PyInstaller 6.21 shared onedir build plus a per-user Inno Setup 6.7.1 offline-installer pipeline.
 
-The signed installer and `0.4.0` release remain gated on protected-CI signing, clean Windows 11 VM
-validation and the alpha/RC user acceptance cohorts in the [v0.4 plan](docs/releases/v0.4.md).
+The v0.4 milestone was closed without Authenticode, clean-VM/Defender validation or human cohorts;
+none of those checks are claimed as completed in the [v0.4 record](docs/releases/v0.4.md).
 
 ## Core capabilities inherited from v0.3
 
@@ -97,8 +109,10 @@ octopus update --dry-run --format json
 octopus validate --format json
 octopus report --last --format markdown
 octopus search "项目需求"
+octopus search "项目需求" --format json --open-result 1
 octopus search --full "找到最重要的项目需求和相关材料" --format report-json
 octopus search --full "找到最重要的项目需求和相关材料" --markmap result.html
+octopus evaluate-search --output .octopus-dev\benchmarks\search-value.json --enforce
 octopus watch start
 octopus watch status
 octopus watch stop
@@ -120,8 +134,8 @@ All operational files are under `<Index Repository>/.octopus/`:
 - `transactions/<run_id>/record.json` and immutable `runs/<run_id>.json` reports
 - `update.lock` and `watch.pid`
 
-Raw files and folders are represented by `.url` shortcuts on Windows. Non-text links in normal
-search results point to their Leaf index, not directly to the original file.
+Raw files and folders are represented by `.url` shortcuts on Windows. v0.5 search results expose
+both the generated index path and a stable open target for the original source.
 
 ## Scope boundaries
 
