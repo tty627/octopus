@@ -21,15 +21,20 @@ Protected release CI imports an Authenticode certificate into the current-user s
   -TimestampUrl $env:TIMESTAMP_URL
 ```
 
+Tags containing `.dev` use the unsigned development-prerelease job instead. That job enforces the
+tag/source version match, validates setup and portable artifacts, runs `release-audit`, and creates
+a GitHub Pre-release. Other `v*` tags remain gated by the protected signing environment.
+
 The script runs pytest with the coverage gate, Ruff, strict Mypy, wheel/sdist build, PyInstaller
 GUI/CLI smoke tests, SHA256 generation and signature verification. Inno signs the generated
 uninstaller and final setup; the script signs both application executables before installer
 compilation.
 
-Outputs are written to `release/`. The GUI is `Octopus.exe`; the physical CLI bootloader is
-`octopus-cli.exe`, with `octopus.cmd` as the installed command. This naming is required because
-Windows cannot store `Octopus.exe` and `octopus.exe` as separate files in the same shared onedir
-bundle.
+Outputs are written to `release/`, including the setup executable and an install-free portable
+zip. Portable users extract the zip and run `Octopus.exe`; no Python or Node.js installation is
+needed. The physical CLI bootloader is `octopus-cli.exe`, with `octopus.cmd` as the user command.
+This naming is required because Windows cannot store `Octopus.exe` and `octopus.exe` as separate
+files in the same shared onedir bundle.
 
 Silent installer validation uses `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`; invoke the generated
 uninstaller with the same switches. Both normal and silent cases must confirm that

@@ -4,7 +4,7 @@ import ctypes
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
 from . import __version__
@@ -117,7 +117,7 @@ def smoke_test() -> int:
 
 def _show_startup_error(message: str) -> None:
     if os.name == "nt":
-        ctypes.windll.user32.MessageBoxW(0, message, "Octopus 无法启动", 0x10)
+        cast(Any, ctypes).windll.user32.MessageBoxW(0, message, "Octopus 无法启动", 0x10)
     else:
         print(message, file=sys.stderr)
 

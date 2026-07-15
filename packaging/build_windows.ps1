@@ -133,6 +133,31 @@ if ($Release) {
     }
 }
 
+$PortableDirectory = Join-Path $Root "build\portable\Octopus"
+if (Test-Path -LiteralPath $PortableDirectory) {
+    Remove-Item -LiteralPath $PortableDirectory -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $PortableDirectory | Out-Null
+Copy-Item -Path (Join-Path $Root "dist\Octopus\*") -Destination $PortableDirectory -Recurse
+Copy-Item -LiteralPath (Join-Path $Root "packaging\octopus.cmd") -Destination $PortableDirectory
+$PortableArchive = Join-Path $ReleaseDirectory "Octopus-$Version-win-x64-portable.zip"
+Compress-Archive -Path (Join-Path $PortableDirectory "*") -DestinationPath $PortableArchive `
+    -CompressionLevel Optimal
+$PortableValidationDirectory = Join-Path $Root "build\portable-validation"
+if (Test-Path -LiteralPath $PortableValidationDirectory) {
+    Remove-Item -LiteralPath $PortableValidationDirectory -Recurse -Force
+}
+Expand-Archive -LiteralPath $PortableArchive -DestinationPath $PortableValidationDirectory
+$PortableCli = Join-Path $PortableValidationDirectory "octopus-cli.exe"
+$PortableGui = Join-Path $PortableValidationDirectory "Octopus.exe"
+$PortableVersion = (& $PortableCli version).Trim()
+Assert-NativeSuccess "Portable CLI version check"
+if ($PortableVersion -ne $Version) {
+    throw "Portable CLI version mismatch: expected $Version, found $PortableVersion"
+}
+& $PortableGui --smoke-test
+Assert-NativeSuccess "Portable GUI smoke test"
+
 & $Python -m build --outdir release
 Assert-NativeSuccess "Build wheel and sdist"
 
@@ -190,7 +215,12 @@ $BuildManifest = [ordered]@{
     inno_setup_version = $InnoVersion
     built_at_utc = [DateTime]::UtcNow.ToString("o")
 }
-$BuildManifest | ConvertTo-Json | Set-Content -LiteralPath release\build-manifest.json -Encoding utf8
+$BuildManifestJson = ($BuildManifest | ConvertTo-Json) + [Environment]::NewLine
+[IO.File]::WriteAllText(
+    (Join-Path $ReleaseDirectory "build-manifest.json"),
+    $BuildManifestJson,
+    [Text.UTF8Encoding]::new($false)
+)
 
 $Artifacts = Get-ChildItem -LiteralPath release -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" }
 $Checksums = foreach ($Artifact in $Artifacts) {

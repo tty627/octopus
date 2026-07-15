@@ -36,9 +36,11 @@ IGNORED_DOCUMENTATION_DIRS = {
     ".pytest_cache",
     ".venv",
     ".octopus-dev",
+    "build",
     "dist",
     "node_modules",
     "playwright-report",
+    "release",
     "test-results",
 }
 
@@ -127,6 +129,10 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert "name: Validate signing configuration" in workflow
     assert "Code-signing environment is incomplete" in workflow
     assert "SIGNING_TIMESTAMP_URL must be an absolute HTTPS URL" in workflow
+    assert "contains(github.ref_name, '.dev')" in workflow
+    assert "name: Publish development prerelease" in workflow
+    assert '"--verify-tag", "--prerelease"' in workflow
+    assert "Audit development release" in workflow
     assert "VersionInfoVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductTextVersion={#AppVersion}" in installer
@@ -138,3 +144,17 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278" in (
         language_installer
     )
+
+
+def test_windows_source_launcher_and_portable_package_remain_available() -> None:
+    launcher = (ROOT / "start-octopus.cmd").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts" / "start-octopus.ps1").read_text(encoding="utf-8")
+    packaging = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
+    assert "scripts\\start-octopus.ps1" in launcher
+    assert '"-m", "pip", "install"' in bootstrap
+    assert "Python.Python.3.12" in bootstrap
+    assert "npm" not in bootstrap.lower()
+    assert "win-x64-portable.zip" in packaging
+    assert "Compress-Archive" in packaging
+    assert "Portable GUI smoke test" in packaging
+    assert "[Text.UTF8Encoding]::new($false)" in packaging

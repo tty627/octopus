@@ -10,6 +10,7 @@ dist/
 build/
 release/
 .venv/
+.octopus-runtime/
 .octopus-dev/
 frontend/node_modules/
 frontend/playwright-report/

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   development-package:
-    if: github.ref_type != 'tag'
+    if: github.ref_type != 'tag' || contains(github.ref_name, '.dev')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +25,13 @@ jobs:
       - shell: pwsh
         run: .\packaging\install_inno_language.ps1
       - shell: pwsh
-        run: .\packaging\build_windows.ps1 -Python python
+        run: |
+          $buildArguments = @("-Python", "python")
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+            $buildArguments += @("-ExpectedVersion", $expectedVersion)
+          }
+          & .\packaging\build_windows.ps1 @buildArguments
       - shell: pwsh
         run: |
           $version = (python -c "from octopus import __version__; print(__version__)").Trim()
@@ -33,13 +39,37 @@ jobs:
           .\packaging\validate_windows_install.ps1 -Installer $installer -Checksums release\SHA256SUMS.txt -ExpectedVersion $version -Output release\windows-install-validation.json
           $hash = (Get-FileHash -Algorithm SHA256 release\windows-install-validation.json).Hash.ToLowerInvariant()
           Add-Content release\SHA256SUMS.txt "$hash *windows-install-validation.json"
+      - name: Audit development release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          python -m octopus release-audit --expected-version $expectedVersion --artifacts release
       - uses: actions/upload-artifact@v4
         with:
           name: octopus-windows-development
           path: release/*
+      - name: Publish development prerelease
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          $notes = "Unsigned development preview. Windows may show a SmartScreen warning. Download the setup executable for normal installation or the portable zip for install-free use. Verify downloads with SHA256SUMS.txt."
+          $releaseArguments = @(
+            "release", "create", $env:GITHUB_REF_NAME,
+            "--verify-tag", "--prerelease",
+            "--title", "Octopus $expectedVersion (development preview)",
+            "--notes", $notes
+          )
+          $releaseArguments += (Get-ChildItem -LiteralPath release -File | ForEach-Object {
+            $_.FullName
+          })
+          & gh @releaseArguments
 
   signed-release:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && !contains(github.ref_name, '.dev')
     runs-on: windows-latest
     environment: code-signing
     steps:

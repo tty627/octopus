@@ -15,6 +15,8 @@ No changes yet.
 - 单资料空间任务包 `1.0` Schema、原子保存、revision 冲突、归档、800ms 自动保存和断线本地草稿。
 - 任务包确定性 Markdown/Markmap 兼容导出，以及只复制再次确认来源的 Package 异步导出。
 - Local API 资料空间预检、示例资料和任务包端点；搜索结果新增可选内容标识、修改时间和大小。
+- Windows 一键源码启动入口，自动准备 64 位 Python、虚拟环境和运行依赖，无需 Node.js。
+- 与安装器并列发布的 Windows portable zip，解压后可直接运行并经过 CLI/GUI 烟雾验证。
 
 ### Changed
 

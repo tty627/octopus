@@ -18,6 +18,15 @@ Get-FileHash .\Octopus-1.1.0.dev0-win-x64-setup.exe -Algorithm SHA256
 Hash 必须与校验文件一致。正式发布包还必须通过 Authenticode 与时间戳验证；开发包不会显示
 有效签名，因此仅用于本机开发验证。
 
+## 免安装运行
+
+下载 `Octopus-<版本>-win-x64-portable.zip` 后，解压到任意可写目录，直接双击
+`Octopus.exe`。免安装版与安装版使用相同的 `%APPDATA%\Octopus` 配置和资料空间，不需要
+Python、Node.js 或管理员权限；不要在压缩包内部直接运行。
+
+如果 GitHub 暂时没有 Release，可以在仓库页面点击 **Code → Download ZIP**，解压源码后
+双击根目录的 `start-octopus.cmd`。首次运行会自动准备本地 Python 环境，后续直接启动。
+
 ## 安装与首次结果
 
 1. 以标准用户运行安装器。程序安装到 `%LOCALAPPDATA%\Programs\Octopus`。
