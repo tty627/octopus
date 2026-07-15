@@ -23,6 +23,22 @@ def global_config_path() -> Path:
     return base / "Octopus" / "config.json"
 
 
+def local_data_root() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return base / "Octopus"
+
+
+def workspace_storage_path(workspace_id: str) -> Path:
+    return local_data_root() / "workspaces" / workspace_id
+
+
+def workspace_tasks_path(workspace_id: str) -> Path:
+    return global_config_path().parent / "workspaces" / workspace_id / "tasks"
+
+
 def octopus_dir(index_repository: Path) -> Path:
     return index_repository / ".octopus"
 

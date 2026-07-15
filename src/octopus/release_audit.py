@@ -150,7 +150,9 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         "runtime contracts match contract-freeze-v1.json",
     )
     issues_name = (
-        "v1.1-known-issues.json"
+        "v2.0-known-issues.json"
+        if parsed.major >= 2
+        else "v1.1-known-issues.json"
         if parsed.release >= (1, 1)
         else "v1.0-known-issues.json"
         if parsed.major >= 1

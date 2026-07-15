@@ -67,3 +67,32 @@ def test_environment_fallback_is_provider_aware(monkeypatch: pytest.MonkeyPatch)
         credentials.resolve_ai_api_key("repository-1", "openai_compatible").api_key
         == "openai-secret"
     )
+
+
+@pytest.mark.parametrize("operation", ["read", "delete"])
+def test_lazy_pywin32_import_failure_is_wrapped(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    fake = FakeWin32Cred()
+
+    def missing_dependency(*args: object) -> None:
+        del args
+        raise ModuleNotFoundError("No module named 'win32timezone'", name="win32timezone")
+
+    monkeypatch.setattr(credentials, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        credentials,
+        "_windows_credential_api",
+        lambda: (fake, SimpleNamespace(error=FakeCredentialError)),
+    )
+    method = "CredRead" if operation == "read" else "CredDelete"
+    monkeypatch.setattr(fake, method, missing_dependency)
+
+    with pytest.raises(credentials.CredentialStoreError) as caught:
+        if operation == "read":
+            credentials.read_stored_ai_api_key("repository-1")
+        else:
+            credentials.delete_stored_ai_api_key("repository-1")
+
+    assert isinstance(caught.value.__cause__, ModuleNotFoundError)

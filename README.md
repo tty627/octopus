@@ -98,7 +98,7 @@ Octopus 可以处理：
 
 ## 最简单的安装与启动
 
-当前开发版本为 `1.1.0.dev0`，正式支持 Windows 11 x64。应用使用系统 WebView2 Runtime；如果电脑缺少该组件，启动时会显示安装指引。
+当前开发版本为 `2.0.0.dev0`，正式支持 Windows 11 x64。应用使用系统 WebView2 Runtime；如果电脑缺少该组件，启动时会显示安装指引。
 
 Windows 安装包已经包含 Python、文档解析器和本地 OCR 运行环境。普通用户不需要单独安装 Python、Node.js 或配置 API Key。
 
@@ -109,18 +109,20 @@ Windows 安装包已经包含 Python、文档解析器和本地 OCR 运行环境
 
 如果 GitHub 暂时没有可下载的 Release，也不需要手工部署：点击 **Code → Download ZIP**，解压后双击根目录的 `start-octopus.cmd`。首次运行会自动选择 64 位 Python 3.12+、创建本地虚拟环境并安装依赖；电脑没有兼容 Python 时，会通过 Windows Package Manager 为当前用户自动安装。后续启动不会重复安装。这个入口不需要 Git、Node.js，也不需要执行 `Activate.ps1`。
 
-`1.1.0.dev0` 当前提供的是未签名开发安装包，Windows 可能显示 SmartScreen 提示。发布文件应使用仓库提供的 `SHA256SUMS.txt` 校验完整性。
+`2.0.0.dev0` 当前提供的是未签名开发安装包，Windows 可能显示 SmartScreen 提示。发布文件应使用仓库提供的 `SHA256SUMS.txt` 校验完整性。
 
 详细步骤见 [Windows 安装与首次运行](docs/user/WINDOWS_INSTALLATION.md)。
 
 ## 基本使用
 
-在工作台输入文件名、内容线索或需要完成的任务，例如：
+首次启动只需选择原始资料文件夹。Octopus 会把可重建缓存放入 Local AppData，把任务保存到 Roaming AppData，不要求选择索引目录。
+
+在“搜索”中输入文件名、章节或正文线索，例如：
 
 ```text
-查找最终版报价和审批记录
-准备季度项目汇报需要的进展、预算与风险资料
-整理最近一次范围变更的决策依据
+微分方程
+级数
+一阶线性方程
 ```
 
 搜索完成后：

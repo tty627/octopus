@@ -1,5 +1,6 @@
-export type PageId = "workbench" | "search" | "task-packs" | "repositories" | "settings";
-export type IndexType = "text" | "leaf" | "foldernode";
+export type PageId = "search" | "tasks" | "documents" | "settings";
+export type Readability = "readable" | "partial" | "low";
+export type IndexingState = "indexed" | "metadata_only" | "failed";
 
 export interface BootstrapPayload {
   base_url: string;
@@ -8,41 +9,91 @@ export interface BootstrapPayload {
   platform: string;
 }
 
-export interface Repository {
-  repository_id: string;
-  name: string;
-  raw_repository_path?: string;
-  index_repository_path: string;
-  available: boolean;
-  enabled: boolean;
-  last_successful_update_at?: string;
-  states?: Record<string, number>;
-  queues?: Record<string, unknown>;
-  scan?: { scan_generation?: number; last_scan_at?: string };
+export interface WorkspaceHealth {
+  document_count: number;
+  readable_count: number;
+  partial_count: number;
+  low_quality_count: number;
+  metadata_only_count: number;
+  failed_count: number;
+  last_sync_at: string;
 }
 
-export interface RepositoryEstimate {
+export interface Workspace {
+  workspace_id: string;
+  name: string;
   raw_path: string;
-  index_path: string;
-  file_count: number;
-  directory_count: number;
-  supported_file_count: number;
-  unsupported_file_count: number;
-  format_counts: Record<string, number>;
-  total_source_bytes: number;
-  estimated_index_bytes: number;
-  required_free_bytes: number;
-  available_free_bytes: number;
-  estimated_seconds_p50: number;
-  estimated_seconds_p95: number;
-  blockers: string[];
-  warnings: string[];
+  available: boolean;
+  enabled: boolean;
+  vision_enabled: boolean;
+  legacy_index_present: boolean;
+  health: WorkspaceHealth;
+}
+
+export interface WorkspaceDocument {
+  document_id: string;
+  name: string;
+  relative_path: string;
+  extension: string;
+  content_hash: string;
+  size_bytes: number;
+  modified_at: string;
+  title: string;
+  overview: string;
+  page_count: number;
+  readability: Readability;
+  readability_score: number;
+  indexing_state: IndexingState;
+  error: string;
+  source_uri: string;
+}
+
+export interface WorkspaceEvidence {
+  page_number: number | null;
+  heading: string;
+  excerpt: string;
+  reason: string;
+  quality_score: number;
+}
+
+export interface SearchResultV2 {
+  document_id: string;
+  name: string;
+  relative_path: string;
+  extension: string;
+  content_hash: string;
+  size_bytes: number;
+  modified_at: string;
+  page_count: number;
+  readability: Readability;
+  readability_score: number;
+  source_uri: string;
+  overview: string;
+  best_evidence: WorkspaceEvidence;
+  additional_evidence: WorkspaceEvidence[];
+  rank: number;
+}
+
+export interface SearchReportV2 {
+  query: string;
+  requested_mode: "local" | "assisted";
+  actual_mode: "local" | "assisted" | "degraded";
+  degradation_reason: string;
+  answer: string;
+  results: SearchResultV2[];
+  candidate_count: number;
+  duration_ms: number;
+}
+
+export interface SearchFiltersV2 {
+  path_prefix: string;
+  extensions: string[];
 }
 
 export type AIProviderId = "deepseek" | "openai_compatible";
 
-export interface AISettings {
-  repository_id: string;
+export interface AISettingsV2 {
+  workspace_id: string;
   enabled: boolean;
   provider: AIProviderId;
   base_url: string;
@@ -50,9 +101,10 @@ export interface AISettings {
   credential_configured: boolean;
   credential_source: "windows_credential" | "environment" | "none";
   credential_error: string;
+  vision_enabled: boolean;
 }
 
-export interface AISettingsInput {
+export interface AISettingsInputV2 {
   enabled: boolean;
   provider: AIProviderId;
   base_url: string;
@@ -67,78 +119,7 @@ export interface AIConnectionResult {
   message: string;
 }
 
-export interface EvidenceAnchor {
-  locator: string;
-  kind: string;
-  text_excerpt?: string;
-  extraction_method?: string;
-  confidence?: number | null;
-}
-
-export interface MatchEvidence {
-  field: "name" | "path" | "summary" | "keywords" | "evidence" | "body";
-  locator: string;
-  excerpt: string;
-  matched_terms: string[];
-}
-
-export interface SearchResult {
-  node_id: string;
-  index_type: IndexType;
-  index_path: string;
-  raw_relative_path: string;
-  name: string;
-  summary: string;
-  description: string;
-  status: string;
-  source_uri: string;
-  content_id: string;
-  modified_at: string;
-  size_bytes: number;
-  evidence: EvidenceAnchor[];
-  quality_flags: string[];
-  risk_flags: string[];
-  rank: number;
-  score: number;
-  match_reasons: string[];
-  match_evidence: MatchEvidence[];
-  explanation: string;
-  recommended_open_target: "index" | "source";
-  open_target_uri: string;
-}
-
-export interface SearchFilters {
-  index_types: IndexType[];
-  path_prefix: string;
-  statuses: string[];
-  quality_flags: string[];
-  modified_after: string;
-  modified_before: string;
-}
-
-export interface SearchReport {
-  query: string;
-  requested_mode: "local" | "auto";
-  actual_mode: "local" | "ai" | "degraded";
-  degradation_reason: string;
-  answer: {
-    summary: string;
-    recommended_node_ids: string[];
-    warnings: string[];
-    cited_node_ids: string[];
-  };
-  results: SearchResult[];
-  candidate_count: number;
-  duration_ms: number;
-  ai_usage?: {
-    calls: number;
-    total_tokens: number;
-    models: Record<string, number>;
-    estimated_cost?: number | null;
-  };
-}
-
-export interface TaskPackSlot {
+export interface WorkspaceTaskSlot {
   slot_id: string;
   name: string;
   description: string;
@@ -146,47 +127,48 @@ export interface TaskPackSlot {
   required: boolean;
 }
 
-export interface TaskPackItem {
+export interface WorkspaceTaskItem {
   item_id: string;
-  node_id: string;
+  document_id: string;
+  content_hash: string;
   name: string;
-  index_type: IndexType;
-  raw_relative_path: string;
-  content_id: string;
-  status_snapshot: string;
-  anchors: EvidenceAnchor[];
+  relative_path: string;
+  page_number: number | null;
+  excerpt: string;
   rationale: string;
   slot_id: string;
   review_state: "confirmed" | "pending";
+  source_status: "resolved" | "source_unconfirmed";
   position: number;
   added_at?: string;
 }
 
-export interface TaskPack {
+export interface WorkspaceTask {
   schema_version: string;
-  task_pack_id: string;
-  repository_id: string;
+  task_id: string;
+  workspace_id: string;
   revision: number;
   lifecycle: "draft" | "saved" | "archived";
   title: string;
   goal: string;
-  slots: TaskPackSlot[];
-  items: TaskPackItem[];
-  excluded_node_ids: string[];
+  slots: WorkspaceTaskSlot[];
+  items: WorkspaceTaskItem[];
   created_at: string;
   updated_at: string;
+  migrated_from_v1: boolean;
 }
 
-export interface TaskPackSummary {
+export interface WorkspaceTaskSummary {
   schema_version: string;
-  task_pack_id: string;
-  repository_id: string;
+  task_id: string;
+  workspace_id: string;
   revision: number;
   lifecycle: string;
   title: string;
   goal: string;
   item_count: number;
   pending_count: number;
+  unresolved_count: number;
   updated_at: string;
   writable: boolean;
 }
@@ -194,15 +176,9 @@ export interface TaskPackSummary {
 export interface ServiceJob {
   job_id: string;
   repository_id: string;
-  kind: "update" | "rebuild_search" | "validate" | "package";
+  kind: "workspace_sync" | "update" | "rebuild_search" | "validate" | "package";
   status: "queued" | "running" | "succeeded" | "failed";
   result: Record<string, unknown>;
   error_code: string;
   error_message: string;
-}
-
-export interface ValidationReport {
-  error_count: number;
-  warning_count: number;
-  issues: Array<{ severity: "warning" | "error"; code: string; message: string }>;
 }

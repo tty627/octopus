@@ -1,18 +1,17 @@
 import { bootstrapDesktop } from "./bridge";
-import { mockRequest } from "./mockApi";
+import { mockPreviewUrl, mockRequest } from "./mockApi";
 import type {
   AIConnectionResult,
-  AISettings,
-  AISettingsInput,
+  AISettingsInputV2,
+  AISettingsV2,
   BootstrapPayload,
-  Repository,
-  RepositoryEstimate,
-  SearchFilters,
-  SearchReport,
+  SearchFiltersV2,
+  SearchReportV2,
   ServiceJob,
-  TaskPack,
-  TaskPackSummary,
-  ValidationReport,
+  Workspace,
+  WorkspaceDocument,
+  WorkspaceTask,
+  WorkspaceTaskSummary,
 } from "./types";
 
 export class ApiError extends Error {
@@ -45,10 +44,7 @@ async function request<T>(
       if (error instanceof ApiError) throw error;
       if (error instanceof Error && "status" in error) {
         const status = Number(error.status);
-        const message = status === 409
-          ? "任务包已经发生变化，请重新载入或保留本地草稿。"
-          : error.message;
-        throw new ApiError(message, status, error.message);
+        throw new ApiError(error.message, status, error.message);
       }
       throw new ApiError(error instanceof Error ? error.message : "本地演示服务不可用", 500);
     }
@@ -66,14 +62,14 @@ async function request<T>(
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new ApiError("本地服务暂时不可用，正在保留当前工作。", 0, String(error));
+    throw new ApiError("本地服务暂时不可用，当前任务草稿已保留。", 0, String(error));
   }
   if (!response.ok) {
     const detail = await response.text();
     let message = "操作没有完成，请重试。";
-    if (response.status === 409) message = "任务包已经发生变化，请重新载入或保留本地草稿。";
-    if (response.status === 404) message = "所选资料或任务包已经不可访问。";
-    if (response.status === 422) message = "当前范围不满足操作条件，请检查选择内容。";
+    if (response.status === 409) message = "任务或同步状态已经变化，请重新载入。";
+    if (response.status === 404) message = "所选资料或任务已经不可访问。";
+    if (response.status === 422) message = "当前输入无法处理，请检查所选范围。";
     throw new ApiError(message, response.status, detail);
   }
   if (response.headers.get("content-type")?.includes("text/plain")) {
@@ -82,82 +78,100 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
+async function previewUrl(
+  workspaceId: string,
+  documentId: string,
+  page: number,
+): Promise<string> {
+  const runtime = await runtimeBootstrap();
+  if (runtime.base_url.startsWith("mock:")) return mockPreviewUrl(documentId, page);
+  const response = await fetch(
+    `${runtime.base_url}/v2/workspaces/${workspaceId}/documents/${documentId}/pages/${page}/preview`,
+    { headers: { Authorization: `Bearer ${runtime.token}` } },
+  );
+  if (!response.ok) throw new ApiError("页面预览暂时不可用。", response.status);
+  return URL.createObjectURL(await response.blob());
+}
+
 export const api = {
-  repositories: () => request<Repository[]>("/v1/repositories"),
-  preflight: (raw_path: string, index_path: string) =>
-    request<RepositoryEstimate>("/v1/repositories/preflight", {
+  workspaces: () => request<Workspace[]>("/v2/workspaces"),
+  workspace: (workspaceId: string) => request<Workspace>(`/v2/workspaces/${workspaceId}`),
+  createWorkspace: (raw_path: string, name: string) =>
+    request<{ workspace: Workspace; job: ServiceJob }>("/v2/workspaces", {
       method: "POST",
-      body: { raw_path, index_path, ai_enabled: false },
+      body: { raw_path, name },
     }),
-  createRepository: (raw_path: string, index_path: string, name: string) =>
-    request<{ repository: Repository; job: ServiceJob }>("/v1/repositories", {
+  syncWorkspace: (workspaceId: string) =>
+    request<ServiceJob>(`/v2/workspaces/${workspaceId}/sync`, { method: "POST" }),
+  documents: (workspaceId: string) =>
+    request<WorkspaceDocument[]>(`/v2/workspaces/${workspaceId}/documents`),
+  reprocessDocument: (workspaceId: string, documentId: string) =>
+    request<ServiceJob>(
+      `/v2/workspaces/${workspaceId}/documents/${documentId}/reprocess`,
+      { method: "POST" },
+    ),
+  search: (
+    workspaceId: string,
+    query: string,
+    mode: "local" | "assisted",
+    filters: SearchFiltersV2,
+    signal?: AbortSignal,
+  ) =>
+    request<SearchReportV2>(`/v2/workspaces/${workspaceId}/search`, {
       method: "POST",
-      body: { raw_path, index_path, name, build: true },
+      body: { query, mode, limit: 50, ...filters },
+      signal,
     }),
-  createSample: () =>
-    request<{ repository: Repository; job: ServiceJob }>("/v1/repositories/sample", {
-      method: "POST",
-      body: { name: "Octopus 示例资料" },
-    }),
-  aiSettings: (repositoryId: string) =>
-    request<AISettings>(`/v1/repositories/${repositoryId}/ai-settings`),
-  saveAISettings: (repositoryId: string, settings: AISettingsInput) =>
-    request<AISettings>(`/v1/repositories/${repositoryId}/ai-settings`, {
+  previewUrl,
+  aiSettings: (workspaceId: string) =>
+    request<AISettingsV2>(`/v2/workspaces/${workspaceId}/ai-settings`),
+  saveAISettings: (workspaceId: string, settings: AISettingsInputV2) =>
+    request<AISettingsV2>(`/v2/workspaces/${workspaceId}/ai-settings`, {
       method: "PUT",
       body: settings,
     }),
-  testAISettings: (repositoryId: string, settings: Omit<AISettingsInput, "enabled">) =>
-    request<AIConnectionResult>(`/v1/repositories/${repositoryId}/ai-settings/test`, {
+  testAISettings: (workspaceId: string, settings: AISettingsInputV2) =>
+    request<AIConnectionResult>(`/v2/workspaces/${workspaceId}/ai-settings/test`, {
       method: "POST",
       body: settings,
     }),
-  search: (
-    repositoryId: string,
-    query: string,
-    mode: "local" | "auto",
-    filters: SearchFilters,
-    signal?: AbortSignal,
-  ) =>
-    request<SearchReport>(`/v1/repositories/${repositoryId}/search`, {
-      method: "POST",
-      body: { query, mode, limit: 50, filters },
-      signal,
-    }),
-  taskPacks: (repositoryId: string) =>
-    request<TaskPackSummary[]>(`/v1/repositories/${repositoryId}/task-packs`),
-  createTaskPack: (repositoryId: string, title: string, goal: string) =>
-    request<TaskPack>(`/v1/repositories/${repositoryId}/task-packs`, {
+  setVisionAuthorization: (workspaceId: string, vision_enabled: boolean) =>
+    request<{ workspace_id: string; vision_enabled: boolean }>(
+      `/v2/workspaces/${workspaceId}/vision-authorization`,
+      { method: "PUT", body: { vision_enabled } },
+    ),
+  tasks: (workspaceId: string) =>
+    request<WorkspaceTaskSummary[]>(`/v2/workspaces/${workspaceId}/tasks`),
+  createTask: (workspaceId: string, title: string, goal: string) =>
+    request<WorkspaceTask>(`/v2/workspaces/${workspaceId}/tasks`, {
       method: "POST",
       body: { title, goal },
     }),
-  taskPack: (repositoryId: string, taskPackId: string) =>
-    request<TaskPack>(`/v1/repositories/${repositoryId}/task-packs/${taskPackId}`),
-  saveTaskPack: (pack: TaskPack) =>
-    request<TaskPack>(
-      `/v1/repositories/${pack.repository_id}/task-packs/${pack.task_pack_id}`,
-      { method: "PUT", body: { expected_revision: pack.revision, task_pack: pack } },
+  task: (workspaceId: string, taskId: string) =>
+    request<WorkspaceTask>(`/v2/workspaces/${workspaceId}/tasks/${taskId}`),
+  saveTask: (task: WorkspaceTask) =>
+    request<WorkspaceTask>(
+      `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}`,
+      { method: "PUT", body: { expected_revision: task.revision, task } },
     ),
-  archiveTaskPack: (pack: TaskPack) =>
-    request<TaskPack>(
-      `/v1/repositories/${pack.repository_id}/task-packs/${pack.task_pack_id}/archive`,
-      { method: "POST", body: { expected_revision: pack.revision } },
+  archiveTask: (task: WorkspaceTask) =>
+    request<WorkspaceTask>(
+      `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/archive`,
+      { method: "POST", body: { expected_revision: task.revision } },
     ),
-  taskPackMarkdown: (pack: TaskPack) =>
+  taskMarkdown: (task: WorkspaceTask) =>
     request<string>(
-      `/v1/repositories/${pack.repository_id}/task-packs/${pack.task_pack_id}/markdown`,
+      `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/markdown`,
     ),
-  packageTaskPack: (pack: TaskPack, output_path: string, confirmed_item_ids: string[]) =>
-    request<ServiceJob>(
-      `/v1/repositories/${pack.repository_id}/task-packs/${pack.task_pack_id}/package`,
-      { method: "POST", body: { output_path, confirmed_item_ids } },
-    ),
-  updateRepository: (repositoryId: string, retryOnly = false) =>
-    request<ServiceJob>(`/v1/repositories/${repositoryId}/updates`, {
-      method: "POST",
-      body: retryOnly ? { retry_only: true } : {},
-    }),
-  rebuildSearch: (repositoryId: string) =>
-    request<ServiceJob>(`/v1/repositories/${repositoryId}/rebuild-search`, { method: "POST" }),
-  validate: (repositoryId: string) =>
-    request<ValidationReport>(`/v1/repositories/${repositoryId}/validate`, { method: "POST" }),
+  job: (jobId: string) => request<ServiceJob>(`/v2/jobs/${jobId}`),
 };
+
+export async function waitForJob(jobId: string): Promise<ServiceJob> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const job = await api.job(jobId);
+    if (job.status === "succeeded" || job.status === "failed") return job;
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+  }
+  throw new ApiError("后台处理超时，请稍后查看资料状态。", 0);
+}

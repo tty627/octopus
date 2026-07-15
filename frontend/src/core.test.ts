@@ -1,100 +1,81 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hasNativeBootstrap } from "./bridge";
 import { mockRequest } from "./mockApi";
-import { mergeTaskPackSave, useAppStore } from "./store";
-import { appendResult } from "./taskPackActions";
-import type { SearchReport, SearchResult, TaskPack } from "./types";
-import { groupSearchResults } from "./utils";
+import { mergeTaskSave, useAppStore } from "./store";
+import { appendEvidence } from "./taskPackActions";
+import type { SearchReportV2, SearchResultV2, WorkspaceTask } from "./types";
 
-const pack = (): TaskPack => ({
-  schema_version: "1.0",
-  task_pack_id: "pack-1",
-  repository_id: "repository-1",
+const task = (): WorkspaceTask => ({
+  schema_version: "2.0",
+  task_id: "task-1",
+  workspace_id: "workspace-1",
   revision: 1,
   lifecycle: "draft",
   title: "Review",
-  goal: "Review sources",
+  goal: "Review evidence",
   slots: [
-    { slot_id: "core", name: "核心资料", description: "", position: 0, required: true },
-    { slot_id: "more", name: "补充资料", description: "", position: 1, required: false },
+    { slot_id: "core", name: "核心证据", description: "", position: 0, required: true },
+    { slot_id: "more", name: "补充证据", description: "", position: 1, required: false },
     { slot_id: "pending", name: "待核验", description: "", position: 2, required: false },
   ],
   items: [],
-  excluded_node_ids: [],
   created_at: "2026-07-15T00:00:00+00:00",
   updated_at: "2026-07-15T00:00:00+00:00",
+  migrated_from_v1: false,
 });
 
-const result = (overrides: Partial<SearchResult> = {}): SearchResult => ({
-  node_id: "node-1",
-  index_type: "leaf",
-  index_path: "C:\\Index\\source.md",
-  raw_relative_path: "source.pdf",
+const result = (overrides: Partial<SearchResultV2> = {}): SearchResultV2 => ({
+  document_id: "document-1",
   name: "source.pdf",
-  summary: "Evidence",
-  description: "Evidence",
-  status: "indexed",
-  source_uri: "file:///C:/Raw/source.pdf",
-  content_id: "sha256:test",
-  modified_at: "2026-07-15T00:00:00+00:00",
+  relative_path: "chapter/source.pdf",
+  extension: ".pdf",
+  content_hash: "hash-1",
   size_bytes: 42,
-  evidence: [],
-  quality_flags: [],
-  risk_flags: [],
+  modified_at: "2026-07-15T00:00:00+00:00",
+  page_count: 12,
+  readability: "readable",
+  readability_score: 0.9,
+  source_uri: "file:///C:/Raw/source.pdf",
+  overview: "Evidence",
+  best_evidence: {
+    page_number: 3,
+    heading: "第三章",
+    excerpt: "Primary evidence",
+    reason: "正文包含查询内容",
+    quality_score: 0.9,
+  },
+  additional_evidence: [],
   rank: 1,
-  score: 1,
-  match_reasons: ["Exact match"],
-  match_evidence: [],
-  explanation: "Primary evidence",
-  recommended_open_target: "source",
-  open_target_uri: "file:///C:/Raw/source.pdf",
   ...overrides,
 });
 
 afterEach(() => vi.useRealTimers());
 
-describe("search sequencing", () => {
-  it("delivers local results before AI enhancement", async () => {
+describe("V2 local search", () => {
+  it("returns one result per document with a human-readable evidence reason", async () => {
     vi.useFakeTimers();
-    const configured = mockRequest(
-      "/v1/repositories/demo-repository/ai-settings",
-      "PUT",
-      {
-        enabled: true,
-        provider: "deepseek",
-        base_url: "https://api.deepseek.com",
-        model: "deepseek-v4-flash",
-        api_key: "test-key",
-      },
-    );
-    await vi.advanceTimersByTimeAsync(51);
-    await configured;
-    const local = mockRequest<SearchReport>(
-      "/v1/repositories/demo-repository/search",
+    const pending = mockRequest<SearchReportV2>(
+      "/v2/workspaces/demo-workspace/search",
       "POST",
-      { query: "quarterly review", mode: "local" },
+      { query: "微分方程", mode: "local" },
     );
-    const ai = mockRequest<SearchReport>(
-      "/v1/repositories/demo-repository/search",
-      "POST",
-      { query: "quarterly review", mode: "auto" },
-    );
-    let aiReady = false;
-    void ai.then(() => { aiReady = true; });
-    await vi.advanceTimersByTimeAsync(121);
-    await expect(local).resolves.toMatchObject({ actual_mode: "local" });
-    expect(aiReady).toBe(false);
-    await vi.advanceTimersByTimeAsync(500);
-    await expect(ai).resolves.toMatchObject({ actual_mode: "ai" });
+    await vi.advanceTimersByTimeAsync(101);
+    const report = await pending;
+    expect(report.results.map((item) => item.document_id)).toEqual([
+      "document-1",
+      "document-3",
+    ]);
+    expect(report.results[0]?.best_evidence.reason).toContain("正文");
+    expect(JSON.stringify(report.results)).not.toMatch(/exact_name|folder_child|summary_layer|index_path/);
   });
 
-  it("aborts an obsolete query without affecting the next one", async () => {
+  it("aborts an obsolete query", async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
-    const obsolete = mockRequest<SearchReport>(
-      "/v1/repositories/demo-repository/search",
+    const obsolete = mockRequest<SearchReportV2>(
+      "/v2/workspaces/demo-workspace/search",
       "POST",
-      { query: "old", mode: "auto" },
+      { query: "old", mode: "local" },
       controller.signal,
     );
     controller.abort();
@@ -103,52 +84,41 @@ describe("search sequencing", () => {
 });
 
 describe("desktop bridge readiness", () => {
-  it("waits for the native bootstrap method instead of accepting an empty API object", () => {
+  it("waits for the native bootstrap method", () => {
     expect(hasNativeBootstrap({})).toBe(false);
     expect(hasNativeBootstrap({ bootstrap: vi.fn() })).toBe(true);
   });
 });
 
-describe("deterministic result and task behavior", () => {
-  it("groups folders and risky evidence without AI", () => {
-    const grouped = groupSearchResults([
-      result(),
-      result({ node_id: "folder", index_type: "foldernode", rank: 2 }),
-      result({ node_id: "risk", rank: 5, quality_flags: ["ocr_low_confidence"] }),
-    ]);
-    expect(grouped.核心资料).toHaveLength(1);
-    expect(grouped.相关文件夹).toHaveLength(1);
-    expect(grouped.需要核验).toHaveLength(1);
-  });
-
-  it("puts risky sources in pending and never confirms them automatically", () => {
-    const updated = appendResult(
-      pack(),
-      result({ quality_flags: ["ocr_low_confidence"], risk_flags: ["extraction_risk"] }),
+describe("V2 task evidence behavior", () => {
+  it("puts low-quality evidence in pending", () => {
+    const updated = appendEvidence(
+      task(),
+      result({ readability: "low", readability_score: 0.3 }),
     );
     expect(updated.items[0]).toMatchObject({ slot_id: "pending", review_state: "pending" });
   });
 
-  it("does not add the same source twice", () => {
-    const once = appendResult(pack(), result());
-    const twice = appendResult(once, result());
+  it("does not add the same page evidence twice", () => {
+    const once = appendEvidence(task(), result());
+    const twice = appendEvidence(once, result());
     expect(twice.items).toHaveLength(1);
   });
 
   it("keeps the dirty flag while a save is in progress", () => {
-    useAppStore.setState({ activeTaskPack: pack(), taskPackDirty: true, saveState: "idle" });
+    useAppStore.setState({ activeTask: task(), taskDirty: true, saveState: "idle" });
     useAppStore.getState().setSaveState("saving");
-    expect(useAppStore.getState()).toMatchObject({ taskPackDirty: true, saveState: "saving" });
+    expect(useAppStore.getState()).toMatchObject({ taskDirty: true, saveState: "saving" });
   });
 
-  it("rebases edits made while an older save request is in flight", () => {
-    const submitted = pack();
+  it("rebases edits made while an older save is in flight", () => {
+    const submitted = task();
     const current = { ...submitted, title: "Updated while saving" };
     const saved = { ...submitted, revision: 2, lifecycle: "saved" as const };
-    expect(mergeTaskPackSave(saved, submitted, current)).toMatchObject({
+    expect(mergeTaskSave(saved, submitted, current)).toMatchObject({
       dirty: true,
-      pack: { title: "Updated while saving", revision: 2 },
+      task: { title: "Updated while saving", revision: 2 },
     });
-    expect(mergeTaskPackSave(saved, submitted, submitted)).toEqual({ pack: saved, dirty: false });
+    expect(mergeTaskSave(saved, submitted, submitted)).toEqual({ task: saved, dirty: false });
   });
 });

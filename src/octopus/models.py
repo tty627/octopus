@@ -151,6 +151,17 @@ class GlobalRepository(OctopusModel):
     enabled: bool = True
 
 
+class GlobalWorkspace(OctopusModel):
+    workspace_id: str
+    name: str
+    raw_path: str
+    storage_path: str
+    legacy_index_path: str = ""
+    enabled: bool = True
+    vision_enabled: bool = False
+    ai_policy: AIConfig = Field(default_factory=AIConfig)
+
+
 class ServiceConfig(OctopusModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1024, le=65535)
@@ -163,6 +174,8 @@ class GlobalConfig(OctopusModel):
     schema_version: str = "0.1"
     active_repository_id: str | None = None
     repositories: dict[str, GlobalRepository] = Field(default_factory=dict)
+    active_workspace_id: str | None = None
+    workspaces: dict[str, GlobalWorkspace] = Field(default_factory=dict)
     service: ServiceConfig = Field(default_factory=ServiceConfig)
 
 
@@ -616,7 +629,7 @@ class JobStatus(StrEnum):
 class ServiceJob(OctopusModel):
     job_id: str
     repository_id: str
-    kind: Literal["update", "rebuild_search", "validate", "package"]
+    kind: Literal["update", "rebuild_search", "validate", "package", "workspace_sync"]
     status: JobStatus = JobStatus.queued
     created_at: str = Field(default_factory=utc_now)
     started_at: str = ""

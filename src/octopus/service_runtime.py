@@ -15,7 +15,7 @@ from .engine import UpdateEngine
 from .models import JobStatus, ServiceJob, utc_now
 
 JobFunction = Callable[[], dict[str, Any]]
-JobKind = Literal["update", "rebuild_search", "validate", "package"]
+JobKind = Literal["update", "rebuild_search", "validate", "package", "workspace_sync"]
 
 
 class JobManager:

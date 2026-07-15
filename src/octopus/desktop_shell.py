@@ -10,7 +10,8 @@ from urllib.parse import unquote, urlparse
 from . import __version__
 from .config import global_config_path
 from .desktop_client import LocalApiClient
-from .desktop_helpers import open_path, suggest_index_path
+from .desktop_helpers import open_path
+from .packaging_smoke import run_v2_dependency_smoke
 from .utils import atomic_write_json, atomic_write_text, load_json
 
 
@@ -57,9 +58,6 @@ class DesktopBridge:
 
         selected = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         return str(selected[0]) if selected else ""
-
-    def suggest_index_path(self, raw_path: str) -> str:
-        return str(suggest_index_path(Path(raw_path).expanduser()))
 
     def save_text_file(self, suggested_name: str, content: str) -> dict[str, Any]:
         if self._window is None:
@@ -110,6 +108,12 @@ def smoke_test() -> int:
             import webview  # noqa: F401
         except ImportError as error:
             print(f"pywebview is unavailable: {error}", file=sys.stderr)
+            return 1
+    if getattr(sys, "frozen", False):
+        try:
+            run_v2_dependency_smoke()
+        except Exception as error:
+            print(f"Octopus V2 packaged dependencies are unavailable: {error}", file=sys.stderr)
             return 1
     print(f"Octopus {__version__} desktop UI smoke test passed")
     return 0

@@ -1,6 +1,6 @@
 # Octopus v0.8 兼容矩阵
 
-本矩阵描述 `1.1.0.dev0` 的工程支持边界。`octopus compatibility` 可输出同一组机器可读信息。
+本矩阵描述 `2.0.0.dev0` 的工程支持边界。`octopus compatibility` 可输出同一组机器可读信息。
 
 ## 平台
 

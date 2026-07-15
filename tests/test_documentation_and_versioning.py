@@ -161,3 +161,9 @@ def test_windows_source_launcher_and_portable_package_remain_available() -> None
     assert "Portable GUI smoke test" in packaging
     assert "Install Playwright Chromium" in packaging
     assert "[Text.UTF8Encoding]::new($false)" in packaging
+
+
+def test_windows_bundle_includes_pywin32_runtime_dependencies() -> None:
+    spec = (ROOT / "packaging" / "octopus.spec").read_text(encoding="utf-8")
+
+    assert '"win32timezone"' in spec

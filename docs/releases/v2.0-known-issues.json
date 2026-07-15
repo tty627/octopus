@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "candidate": "2.0.0.dev0",
+  "issues": [
+    {
+      "id": "OCT-2.0-DEV-001",
+      "severity": "P2",
+      "status": "accepted",
+      "title": "Development installer is unsigned",
+      "mitigation": "This development build remains unsigned; signing and clean-machine Defender validation are external release gates."
+    }
+  ]
+}

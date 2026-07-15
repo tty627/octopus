@@ -55,6 +55,8 @@ def read_stored_ai_api_key(repository_id: str) -> str:
         credential = win32cred.CredRead(
             _target_name(repository_id), win32cred.CRED_TYPE_GENERIC, 0
         )
+    except ImportError as error:
+        raise CredentialStoreError("Windows Credential Manager support is unavailable") from error
     except pywintypes.error as error:
         if getattr(error, "winerror", None) == 1168:
             return ""
@@ -91,6 +93,8 @@ def delete_stored_ai_api_key(repository_id: str) -> None:
     win32cred, pywintypes = _windows_credential_api()
     try:
         win32cred.CredDelete(_target_name(repository_id), win32cred.CRED_TYPE_GENERIC, 0)
+    except ImportError as error:
+        raise CredentialStoreError("Windows Credential Manager support is unavailable") from error
     except pywintypes.error as error:
         if getattr(error, "winerror", None) == 1168:
             return

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "octopus-index"
 dynamic = ["version"]
-description = "Local-first, link-centric file indexing CLI"
+description = "Local-first evidence workspace for trustworthy document search"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "tty627" }]

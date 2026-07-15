@@ -231,6 +231,21 @@ def test_webview_bridge_bootstrap_and_local_uri_policy(tmp_path: Any) -> None:
     assert smoke_test() == 0
 
 
+def test_frozen_smoke_checks_v2_packaged_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[bool] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(
+        desktop_shell_module,
+        "run_v2_dependency_smoke",
+        lambda: checks.append(True),
+    )
+
+    assert smoke_test() == 0
+    assert checks == [True]
+
+
 def test_webview_bridge_only_exposes_whitelisted_public_state() -> None:
     bridge = DesktopBridge(LocalApiClient("http://127.0.0.1:9876", "memory-token"))
 
@@ -243,7 +258,6 @@ def test_webview_bridge_only_exposes_whitelisted_public_state() -> None:
         "open_uri",
         "save_text_file",
         "save_ui_state",
-        "suggest_index_path",
     }
 
 

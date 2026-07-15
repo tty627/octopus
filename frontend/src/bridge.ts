@@ -3,7 +3,6 @@ import type { BootstrapPayload, PageId } from "./types";
 interface NativeBridge {
   bootstrap: () => Promise<BootstrapPayload>;
   choose_directory: () => Promise<string>;
-  suggest_index_path: (rawPath: string) => Promise<string>;
   save_text_file: (
     suggestedName: string,
     content: string,
@@ -44,7 +43,7 @@ export async function bootstrapDesktop(): Promise<BootstrapPayload> {
     return {
       base_url: "mock://octopus",
       token: "development-memory-token",
-      product_version: "1.1.0.dev0",
+      product_version: "2.0.0.dev0",
       platform: "browser-demo",
     };
   }
@@ -54,7 +53,7 @@ export async function bootstrapDesktop(): Promise<BootstrapPayload> {
     return {
       base_url: "mock://octopus",
       token: "development-memory-token",
-      product_version: "1.1.0.dev0",
+      product_version: "2.0.0.dev0",
       platform: "browser-demo",
     };
   }
@@ -64,13 +63,6 @@ export async function bootstrapDesktop(): Promise<BootstrapPayload> {
 export async function chooseDirectory(): Promise<string> {
   const api = nativeApi();
   return api ? await api.choose_directory() : "C:\\Users\\Demo\\Documents\\Research";
-}
-
-export async function suggestIndexPath(rawPath: string): Promise<string> {
-  const api = nativeApi();
-  if (api) return await api.suggest_index_path(rawPath);
-  const trimmed = rawPath.replace(/[\\/]+$/, "");
-  return `${trimmed}-Octopus-Index`;
 }
 
 export async function saveTextFile(name: string, content: string): Promise<boolean> {
@@ -96,6 +88,8 @@ export async function openLocalUri(uri: string): Promise<void> {
 
 export async function loadWindowState(): Promise<{
   page?: PageId;
+  workspace_id?: string;
+  task_id?: string;
   repository_id?: string;
   task_pack_id?: string;
 }> {

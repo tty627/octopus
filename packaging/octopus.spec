@@ -24,6 +24,7 @@ hiddenimports = [
     "rapidocr.inference_engine.onnxruntime",
     "rapidocr.inference_engine.onnxruntime.main",
     "rapidocr.inference_engine.onnxruntime.provider_config",
+    "win32timezone",
     *collect_submodules("webview"),
 ]
 

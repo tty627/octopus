@@ -61,6 +61,7 @@ from .task_packs import (
 )
 from .transactions import load_run_report
 from .validation import validate_repository
+from .workspace_api_v2 import register_workspace_routes
 
 API_CONTRACT_VERSION = "1.0"
 
@@ -304,6 +305,7 @@ def create_app(
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid bearer token")
 
     authenticated = [Depends(authenticate)]
+    register_workspace_routes(app, authenticate, jobs)
 
     @app.get("/v1/health")
     def health() -> dict[str, Any]:

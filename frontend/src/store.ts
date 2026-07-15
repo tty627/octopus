@@ -1,88 +1,89 @@
 import { create } from "zustand";
-import type { PageId, SearchFilters, SearchResult, TaskPack } from "./types";
+import type {
+  PageId,
+  SearchFiltersV2,
+  SearchResultV2,
+  WorkspaceTask,
+} from "./types";
 
-export const EMPTY_FILTERS: SearchFilters = {
-  index_types: [],
-  path_prefix: "",
-  statuses: [],
-  quality_flags: [],
-  modified_after: "",
-  modified_before: "",
-};
+export const EMPTY_FILTERS: SearchFiltersV2 = { path_prefix: "", extensions: [] };
 
 interface AppState {
   page: PageId;
-  repositoryId: string;
-  inspector: SearchResult | null;
+  workspaceId: string;
+  inspector: SearchResultV2 | null;
   inspectorOpen: boolean;
-  activeTaskPack: TaskPack | null;
-  taskPackDirty: boolean;
+  activeTask: WorkspaceTask | null;
+  taskDirty: boolean;
   saveState: "idle" | "saving" | "saved" | "offline" | "conflict";
-  trayExpanded: boolean;
   query: string;
-  filters: SearchFilters;
-  aiEnabled: boolean;
+  filters: SearchFiltersV2;
+  assistedEnabled: boolean;
   setPage: (page: PageId) => void;
-  setRepositoryId: (repositoryId: string) => void;
-  inspect: (result: SearchResult | null) => void;
+  setWorkspaceId: (workspaceId: string) => void;
+  inspect: (result: SearchResultV2 | null) => void;
   closeInspector: () => void;
-  setTaskPack: (pack: TaskPack | null, dirty?: boolean) => void;
-  updateTaskPack: (updater: (pack: TaskPack) => TaskPack) => void;
+  setTask: (task: WorkspaceTask | null, dirty?: boolean) => void;
+  updateTask: (updater: (task: WorkspaceTask) => WorkspaceTask) => void;
   setSaveState: (state: AppState["saveState"]) => void;
-  setTrayExpanded: (expanded: boolean) => void;
   setQuery: (query: string) => void;
-  setFilters: (filters: SearchFilters) => void;
-  setAiEnabled: (enabled: boolean) => void;
+  setFilters: (filters: SearchFiltersV2) => void;
+  setAssistedEnabled: (enabled: boolean) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  page: "workbench",
-  repositoryId: "",
+  page: "search",
+  workspaceId: "",
   inspector: null,
   inspectorOpen: false,
-  activeTaskPack: null,
-  taskPackDirty: false,
+  activeTask: null,
+  taskDirty: false,
   saveState: "idle",
-  trayExpanded: false,
   query: "",
   filters: EMPTY_FILTERS,
-  aiEnabled: false,
+  assistedEnabled: false,
   setPage: (page) => set({ page }),
-  setRepositoryId: (repositoryId) => set({ repositoryId, activeTaskPack: null }),
+  setWorkspaceId: (workspaceId) =>
+    set({ workspaceId, activeTask: null, inspector: null, inspectorOpen: false }),
   inspect: (inspector) => set({ inspector, inspectorOpen: inspector !== null }),
   closeInspector: () => set({ inspectorOpen: false }),
-  setTaskPack: (activeTaskPack, dirty = false) =>
-    set({ activeTaskPack, taskPackDirty: dirty, saveState: dirty ? "idle" : "saved" }),
-  updateTaskPack: (updater) =>
+  setTask: (activeTask, dirty = false) =>
+    set({ activeTask, taskDirty: dirty, saveState: dirty ? "idle" : "saved" }),
+  updateTask: (updater) =>
     set((state) => ({
-      activeTaskPack: state.activeTaskPack ? updater(state.activeTaskPack) : null,
-      taskPackDirty: state.activeTaskPack !== null,
+      activeTask: state.activeTask ? updater(state.activeTask) : null,
+      taskDirty: state.activeTask !== null,
       saveState: "idle",
     })),
   setSaveState: (saveState) =>
     set((state) => ({
       saveState,
-      taskPackDirty: saveState === "saved" ? false : state.taskPackDirty,
+      taskDirty: saveState === "saved" ? false : state.taskDirty,
     })),
-  setTrayExpanded: (trayExpanded) => set({ trayExpanded }),
   setQuery: (query) => set({ query }),
   setFilters: (filters) => set({ filters }),
-  setAiEnabled: (aiEnabled) => set({ aiEnabled }),
+  setAssistedEnabled: (assistedEnabled) => set({ assistedEnabled }),
 }));
 
-export function draftStorageKey(repositoryId: string, taskPackId: string): string {
-  return `octopus:task-pack-draft:${repositoryId}:${taskPackId}`;
+export function draftStorageKey(workspaceId: string, taskId: string): string {
+  return `octopus:v2-task-draft:${workspaceId}:${taskId}`;
 }
 
-export function saveLocalDraft(pack: TaskPack): void {
-  localStorage.setItem(draftStorageKey(pack.repository_id, pack.task_pack_id), JSON.stringify(pack));
+export function saveLocalDraft(task: WorkspaceTask): void {
+  localStorage.setItem(
+    draftStorageKey(task.workspace_id, task.task_id),
+    JSON.stringify(task),
+  );
 }
 
-export function clearLocalDraft(pack: TaskPack): void {
-  localStorage.removeItem(draftStorageKey(pack.repository_id, pack.task_pack_id));
+export function clearLocalDraft(task: WorkspaceTask): void {
+  localStorage.removeItem(draftStorageKey(task.workspace_id, task.task_id));
 }
 
-export function rebaseTaskPackDraft(draft: TaskPack, server: TaskPack): TaskPack {
+export function rebaseTaskDraft(
+  draft: WorkspaceTask,
+  server: WorkspaceTask,
+): WorkspaceTask {
   return {
     ...draft,
     revision: server.revision,
@@ -92,12 +93,12 @@ export function rebaseTaskPackDraft(draft: TaskPack, server: TaskPack): TaskPack
   };
 }
 
-export function mergeTaskPackSave(
-  saved: TaskPack,
-  submitted: TaskPack,
-  current: TaskPack | null,
-): { pack: TaskPack; dirty: boolean } | null {
-  if (!current || current.task_pack_id !== submitted.task_pack_id) return null;
-  if (current === submitted) return { pack: saved, dirty: false };
-  return { pack: rebaseTaskPackDraft(current, saved), dirty: true };
+export function mergeTaskSave(
+  saved: WorkspaceTask,
+  submitted: WorkspaceTask,
+  current: WorkspaceTask | null,
+): { task: WorkspaceTask; dirty: boolean } | null {
+  if (!current || current.task_id !== submitted.task_id) return null;
+  if (current === submitted) return { task: saved, dirty: false };
+  return { task: rebaseTaskDraft(current, saved), dirty: true };
 }
