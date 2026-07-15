@@ -133,6 +133,8 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert "name: Publish development prerelease" in workflow
     assert '"--verify-tag", "--prerelease"' in workflow
     assert "Audit development release" in workflow
+    assert '$buildParameters = @{ Python = "python" }' in workflow
+    assert "@buildParameters" in workflow
     assert "VersionInfoVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductTextVersion={#AppVersion}" in installer
