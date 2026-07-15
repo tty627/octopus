@@ -165,9 +165,13 @@ Assert-NativeSuccess "Build wheel and sdist"
 
 $InnoVersion = ""
 if (-not $SkipInstaller) {
-    $Iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
-    if (-not $Iscc) {
-        $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+    $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+    if (-not (Test-Path -LiteralPath $Iscc)) {
+        $IsccCommand = Get-Command iscc.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($IsccCommand) {
+            $Iscc = $IsccCommand.Source
+        }
     }
     if (-not (Test-Path -LiteralPath $Iscc)) {
         $InnoRegistration = Get-ItemProperty `

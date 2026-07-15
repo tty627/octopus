@@ -4,7 +4,9 @@
 
 ## [Unreleased]
 
-No changes yet.
+### Fixed
+
+- Windows 构建清单优先读取真实 Inno Setup 编译器版本，不再记录 Chocolatey shim 版本。
 
 ## [2.0.0.dev1] - 2026-07-16 (development build)
 
