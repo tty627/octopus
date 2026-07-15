@@ -159,4 +159,5 @@ def test_windows_source_launcher_and_portable_package_remain_available() -> None
     assert "win-x64-portable.zip" in packaging
     assert "Compress-Archive" in packaging
     assert "Portable GUI smoke test" in packaging
+    assert "Install Playwright Chromium" in packaging
     assert "[Text.UTF8Encoding]::new($false)" in packaging

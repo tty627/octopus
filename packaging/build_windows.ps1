@@ -75,6 +75,8 @@ try {
     & $NpmCommand.Source ci
     Assert-NativeSuccess "Install frontend dependencies"
     if (-not $SkipTests) {
+        & $NpmCommand.Source exec -- playwright install chromium
+        Assert-NativeSuccess "Install Playwright Chromium"
         & $NpmCommand.Source run lint
         Assert-NativeSuccess "Frontend ESLint"
         & $NpmCommand.Source run typecheck
