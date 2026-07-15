@@ -1,4 +1,6 @@
 import type {
+  AISettings,
+  AISettingsInput,
   Repository,
   RepositoryEstimate,
   SearchReport,
@@ -21,6 +23,17 @@ const repository: Repository = {
   last_successful_update_at: new Date(Date.now() - 8 * 60_000).toISOString(),
   states: { indexed: 184, pending_stable: 2 },
   scan: { scan_generation: 18, last_scan_at: now },
+};
+
+let aiSettings: AISettings = {
+  repository_id: repository.repository_id,
+  enabled: false,
+  provider: "deepseek",
+  base_url: "https://api.deepseek.com",
+  model: "deepseek-v4-flash",
+  credential_configured: false,
+  credential_source: "none",
+  credential_error: "",
 };
 
 const result = (
@@ -194,18 +207,22 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function searchReport(query: string, mode: "local" | "auto"): SearchReport {
-  const ai = mode === "auto";
+  const aiRequested = mode === "auto";
+  const ai = aiRequested && aiSettings.enabled && aiSettings.credential_configured;
+  const degraded = aiRequested && !ai;
   return {
     query,
     requested_mode: mode,
-    actual_mode: ai ? "ai" : "local",
-    degradation_reason: "",
+    actual_mode: ai ? "ai" : degraded ? "degraded" : "local",
+    degradation_reason: degraded
+      ? aiSettings.enabled ? "ai_key_not_configured" : "ai_disabled"
+      : "",
     answer: {
       summary: ai
         ? "AI 建议：先阅读季度进展，再用预算总表和决策纪要核对范围与资源。"
         : "已按本地索引找到可核验资料。",
       recommended_node_ids: localResults.slice(0, 3).map((item) => item.node_id),
-      warnings: [],
+      warnings: degraded ? ["AI 未参与，本地结果保持完整。"] : [],
       cited_node_ids: localResults.slice(0, 3).map((item) => item.node_id),
     },
     results: ai
@@ -217,6 +234,7 @@ function searchReport(query: string, mode: "local" | "auto"): SearchReport {
       : localResults,
     candidate_count: localResults.length,
     duration_ms: ai ? 680 : 86,
+    ai_usage: ai ? { calls: 2, total_tokens: 420, models: { [aiSettings.model]: 2 } } : undefined,
   };
 }
 
@@ -253,6 +271,39 @@ export async function mockRequest<T>(
       repository,
       job: { job_id: "demo-build", repository_id: repository.repository_id, kind: "update", status: "running" },
     } as T;
+  }
+  if (path.endsWith("/ai-settings/test") && method === "POST") {
+    const request = body as Omit<AISettingsInput, "enabled">;
+    const configured = Boolean(request.api_key || aiSettings.credential_configured);
+    return {
+      ok: configured,
+      code: configured ? "connected" : "key_not_configured",
+      message: configured ? `已连接 ${request.model}。` : "请先填写 API Key。",
+    } as T;
+  }
+  if (path.endsWith("/ai-settings") && method === "GET") {
+    return structuredClone(aiSettings) as T;
+  }
+  if (path.endsWith("/ai-settings") && method === "PUT") {
+    const request = body as AISettingsInput;
+    const credentialConfigured = request.clear_api_key
+      ? false
+      : Boolean(request.api_key || aiSettings.credential_configured);
+    if (request.enabled && !credentialConfigured) {
+      const error = new Error("启用 AI 前需要 API Key");
+      Object.assign(error, { status: 422 });
+      throw error;
+    }
+    aiSettings = {
+      ...aiSettings,
+      enabled: request.enabled,
+      provider: request.provider,
+      base_url: request.base_url,
+      model: request.model,
+      credential_configured: credentialConfigured,
+      credential_source: credentialConfigured ? "windows_credential" : "none",
+    };
+    return structuredClone(aiSettings) as T;
   }
   if (path.endsWith("/search") && method === "POST") {
     const request = body as { query: string; mode: "local" | "auto" };

@@ -1,4 +1,4 @@
-export type PageId = "workbench" | "search" | "task-packs" | "repositories";
+export type PageId = "workbench" | "search" | "task-packs" | "repositories" | "settings";
 export type IndexType = "text" | "leaf" | "foldernode";
 
 export interface BootstrapPayload {
@@ -37,6 +37,34 @@ export interface RepositoryEstimate {
   estimated_seconds_p95: number;
   blockers: string[];
   warnings: string[];
+}
+
+export type AIProviderId = "deepseek" | "openai_compatible";
+
+export interface AISettings {
+  repository_id: string;
+  enabled: boolean;
+  provider: AIProviderId;
+  base_url: string;
+  model: string;
+  credential_configured: boolean;
+  credential_source: "windows_credential" | "environment" | "none";
+  credential_error: string;
+}
+
+export interface AISettingsInput {
+  enabled: boolean;
+  provider: AIProviderId;
+  base_url: string;
+  model: string;
+  api_key?: string;
+  clear_api_key?: boolean;
+}
+
+export interface AIConnectionResult {
+  ok: boolean;
+  code: string;
+  message: string;
 }
 
 export interface EvidenceAnchor {
@@ -102,6 +130,12 @@ export interface SearchReport {
   results: SearchResult[];
   candidate_count: number;
   duration_ms: number;
+  ai_usage?: {
+    calls: number;
+    total_tokens: number;
+    models: Record<string, number>;
+    estimated_cost?: number | null;
+  };
 }
 
 export interface TaskPackSlot {

@@ -9,6 +9,7 @@ import {
   Octagon,
   RefreshCw,
   Search,
+  Settings,
   WifiOff,
 } from "lucide-react";
 import { ApiError, api, runtimeBootstrap } from "./api";
@@ -23,6 +24,7 @@ import {
 import type { PageId, TaskPack } from "./types";
 import { relativeTime } from "./utils";
 import { EvidenceInspector } from "./components/EvidenceInspector";
+import { AISettingsView } from "./components/AISettingsView";
 import { Onboarding } from "./components/Onboarding";
 import { RepositoriesView } from "./components/RepositoriesView";
 import { SearchWorkspace } from "./components/SearchWorkspace";
@@ -36,6 +38,7 @@ const navItems: Array<{ id: PageId; label: string; icon: typeof LayoutDashboard 
   { id: "search", label: "搜索", icon: Search },
   { id: "task-packs", label: "任务包", icon: FolderKanban },
   { id: "repositories", label: "资料空间", icon: Database },
+  { id: "settings", label: "设置", icon: Settings },
 ];
 
 export default function App() {
@@ -160,8 +163,9 @@ export default function App() {
         {page === "search" && <SearchWorkspace addResult={addResult} />}
         {page === "task-packs" && <TaskPacksView />}
         {page === "repositories" && <RepositoriesView repositories={repositories.data} />}
+        {page === "settings" && <AISettingsView repository={currentRepository} />}
       </main>
-      <EvidenceInspector onAdd={(result) => addResult(result, useAppStore.getState().query || "资料整理任务")} />
+      {page !== "settings" && <EvidenceInspector onAdd={(result) => addResult(result, useAppStore.getState().query || "资料整理任务")} />}
       <TaskTray />
     </div>
   );

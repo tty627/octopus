@@ -56,6 +56,19 @@ afterEach(() => vi.useRealTimers());
 describe("search sequencing", () => {
   it("delivers local results before AI enhancement", async () => {
     vi.useFakeTimers();
+    const configured = mockRequest(
+      "/v1/repositories/demo-repository/ai-settings",
+      "PUT",
+      {
+        enabled: true,
+        provider: "deepseek",
+        base_url: "https://api.deepseek.com",
+        model: "deepseek-v4-flash",
+        api_key: "test-key",
+      },
+    );
+    await vi.advanceTimersByTimeAsync(51);
+    await configured;
     const local = mockRequest<SearchReport>(
       "/v1/repositories/demo-repository/search",
       "POST",

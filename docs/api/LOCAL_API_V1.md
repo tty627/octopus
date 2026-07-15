@@ -17,6 +17,8 @@ v0.6 起，桌面端只通过 loopback Local API v1 调用仓库核心能力。`
 | GET | `/v1/contract` | 契约握手与能力发现 | 200 |
 | GET/POST | `/v1/repositories` | 列表 / 创建并可异步首建 | 200 / 201 |
 | GET | `/v1/repositories/{id}` | 状态、队列和路径快照 | 200 |
+| GET/PUT | `/v1/repositories/{id}/ai-settings` | 读取或保存脱敏 AI 设置 | 200 |
+| POST | `/v1/repositories/{id}/ai-settings/test` | 使用提交的配置测试模型连接 | 200 |
 | POST | `/v1/repositories/{id}/updates` | 更新、重试或 dry-run | 202 Job |
 | POST | `/v1/repositories/{id}/search` | 统一 `SearchReport` | 200 |
 | POST | `/v1/repositories/{id}/validate` | 只读校验 | 200 |
@@ -28,6 +30,9 @@ v0.6 起，桌面端只通过 loopback Local API v1 调用仓库核心能力。`
 
 创建仓库固定 `ai_enabled=false` 且要求空 Index 目录。更新和修复以 Job 返回，桌面端轮询到
 `succeeded` 或 `failed`；桌面进程崩溃不会取消服务中的提交事务。
+
+AI 设置响应只返回密钥是否存在及其来源，不返回密钥内容。桌面端保存的密钥按资料空间写入
+Windows 凭据管理器；Repository Config 只保存服务商、Base URL、模型和启用状态。
 
 ## 错误与恢复
 

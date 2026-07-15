@@ -89,8 +89,8 @@ class UpdateEngine:
         self.transaction: IndexTransaction | None = None
         self.run_errors: list[dict[str, str]] = []
         self.stats = UpdateStats(
-            ai_provider="deepseek"
-            if type(self.provider).__name__ == "DeepSeekProvider"
+            ai_provider=self.config.ai_policy.provider
+            if type(self.provider) is not HeuristicProvider
             else "heuristic"
         )
 

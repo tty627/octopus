@@ -1,5 +1,6 @@
 import * as Checkbox from "@radix-ui/react-checkbox";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Check,
@@ -11,6 +12,7 @@ import {
   LoaderCircle,
   Plus,
   Search,
+  Settings2,
   Sparkles,
   X,
 } from "lucide-react";
@@ -29,6 +31,18 @@ const typeOptions: Array<{ value: IndexType; label: string }> = [
   { value: "foldernode", label: "文件夹" },
 ];
 
+const degradationMessages: Record<string, string> = {
+  ai_disabled: "当前资料空间尚未启用 AI。",
+  ai_key_not_configured: "尚未配置 API Key。",
+  ai_auth_failed: "API Key 验证失败。",
+  ai_quota_exhausted: "模型账户余额或配额不足。",
+  ai_rate_limited: "模型服务请求过于频繁。",
+  ai_budget_exhausted: "本次 AI 使用预算已经到达上限。",
+  ai_no_valid_evidence: "模型没有返回可核验的引用。",
+  ai_invalid_output: "模型返回内容无法验证。",
+  ai_unavailable: "暂时无法连接模型服务。",
+};
+
 export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
   const repositoryId = useAppStore((state) => state.repositoryId);
   const query = useAppStore((state) => state.query);
@@ -37,6 +51,7 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
   const setFilters = useAppStore((state) => state.setFilters);
   const aiEnabled = useAppStore((state) => state.aiEnabled);
   const setAiEnabled = useAppStore((state) => state.setAiEnabled);
+  const setPage = useAppStore((state) => state.setPage);
   const inspect = useAppStore((state) => state.inspect);
   const inspector = useAppStore((state) => state.inspector);
   const [intent, setIntent] = useState<"find" | "task">("find");
@@ -47,6 +62,14 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const sequence = useRef(0);
   const controller = useRef<AbortController | null>(null);
+  const aiSettings = useQuery({
+    queryKey: ["ai-settings", repositoryId],
+    queryFn: () => api.aiSettings(repositoryId),
+    enabled: Boolean(repositoryId),
+  });
+  const aiAvailable = Boolean(
+    aiSettings.data?.enabled && aiSettings.data.credential_configured,
+  );
 
   const runSearch = async () => {
     const trimmed = query.trim();
@@ -70,7 +93,7 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
       try {
         const enhanced = await api.search(repositoryId, trimmed, "auto", filters, current.signal);
         if (requestSequence !== sequence.current) return;
-        if (enhanced.actual_mode === "ai") setReport(enhanced);
+        setReport(enhanced);
         setStage(enhanced.actual_mode === "degraded" ? "degraded" : "ready");
       } catch (reason) {
         if (reason instanceof DOMException && reason.name === "AbortError") return;
@@ -85,6 +108,9 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
   };
 
   useEffect(() => () => controller.current?.abort(), []);
+  useEffect(() => {
+    if (!aiAvailable && aiEnabled) setAiEnabled(false);
+  }, [aiAvailable, aiEnabled, setAiEnabled]);
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.key === "Enter" && inspector) {
@@ -121,12 +147,16 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
           <button className={intent === "find" ? "segmentActive" : ""} onClick={() => setIntent("find")}>找资料</button>
           <button className={intent === "task" ? "segmentActive" : ""} onClick={() => setIntent("task")}>做任务</button>
         </div>
-        <label className="aiToggle">
-          <Checkbox.Root checked={aiEnabled} onCheckedChange={(value) => setAiEnabled(value === true)} aria-label="启用 AI 任务辅助">
-            <Checkbox.Indicator><Check size={13} /></Checkbox.Indicator>
-          </Checkbox.Root>
-          <Sparkles size={15} />AI 任务辅助
-        </label>
+        {aiAvailable ? (
+          <label className="aiToggle">
+            <Checkbox.Root checked={aiEnabled} onCheckedChange={(value) => setAiEnabled(value === true)} aria-label="启用 AI 任务辅助">
+              <Checkbox.Indicator><Check size={13} /></Checkbox.Indicator>
+            </Checkbox.Root>
+            <Sparkles size={15} />AI 任务辅助
+          </label>
+        ) : (
+          <button className="aiSetupButton" onClick={() => setPage("settings")}><Settings2 size={15} />配置 AI</button>
+        )}
       </div>
       <form className="searchForm" onSubmit={(event) => { event.preventDefault(); void runSearch(); }}>
         <Search size={20} />
@@ -146,7 +176,7 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
         <div className="searchProgress" aria-live="polite">
           {stage === "local" && "正在查找本地索引..."}
           {stage === "ai" && <><Sparkles size={14} /> 本地结果已就绪，AI 正在补充排序</>}
-          {stage === "degraded" && <><AlertTriangle size={14} /> AI 暂不可用，本地结果保持完整</>}
+          {stage === "degraded" && <><AlertTriangle size={14} /> AI 未参与，本地结果保持完整</>}
           {stage === "ready" && report && `找到 ${report.results.length} 项资料 · ${report.duration_ms} ms`}
         </div>
       </div>
@@ -162,6 +192,16 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
         <div className="selectionBar"><CheckSquare size={17} /><span>已选择 {selected.size} 项</span><button className="primaryButton smallButton" onClick={() => void bulkAdd()}><Plus size={16} />加入任务包</button><button className="textButton smallButton" onClick={() => setSelected(new Set())}>取消</button></div>
       )}
       {error && <div className="pageError" role="alert"><AlertTriangle size={20} /><div><strong>搜索没有完成</strong><p>{error}</p></div><button className="secondaryButton" onClick={() => void runSearch()}>重试</button></div>}
+      {report?.actual_mode === "ai" && (
+        <section className="aiAnswerPanel" aria-label="AI 建议">
+          <div className="aiAnswerHeading"><Sparkles size={18} /><div><strong>AI 建议</strong><small>{Object.keys(report.ai_usage?.models ?? {})[0] || aiSettings.data?.model}</small></div></div>
+          <p>{report.answer.summary}</p>
+          {report.answer.warnings.length > 0 && <div className="aiWarnings">{report.answer.warnings.map((warning) => <span key={warning}><AlertTriangle size={14} />{warning}</span>)}</div>}
+        </section>
+      )}
+      {stage === "degraded" && report && (
+        <div className="aiDegradedNotice" role="status"><AlertTriangle size={17} /><span><strong>AI 未参与本次搜索</strong><small>{degradationMessages[report.degradation_reason] || "本地搜索结果保持完整。"}</small></span><button className="textButton smallButton" onClick={() => setPage("settings")}><Settings2 size={15} />检查设置</button></div>
+      )}
       {!report && !error && stage === "idle" && (
         <div className="searchEmpty"><Search size={28} /><h2>{intent === "find" ? "从现有资料中找到可核验证据" : "先描述任务，再逐项确认资料"}</h2><p>可以输入文件名、项目、人名、时间，或直接说明你要完成的工作。</p><div className="suggestionList">{["最终版报价和审批记录", "季度汇报需要的进展、预算与风险", "最近一次范围变更决策"].map((value) => <button key={value} onClick={() => { setQuery(value); }}>{value}</button>)}</div></div>
       )}

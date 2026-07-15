@@ -1,6 +1,9 @@
 import { bootstrapDesktop } from "./bridge";
 import { mockRequest } from "./mockApi";
 import type {
+  AIConnectionResult,
+  AISettings,
+  AISettingsInput,
   BootstrapPayload,
   Repository,
   RepositoryEstimate,
@@ -95,6 +98,18 @@ export const api = {
     request<{ repository: Repository; job: ServiceJob }>("/v1/repositories/sample", {
       method: "POST",
       body: { name: "Octopus 示例资料" },
+    }),
+  aiSettings: (repositoryId: string) =>
+    request<AISettings>(`/v1/repositories/${repositoryId}/ai-settings`),
+  saveAISettings: (repositoryId: string, settings: AISettingsInput) =>
+    request<AISettings>(`/v1/repositories/${repositoryId}/ai-settings`, {
+      method: "PUT",
+      body: settings,
+    }),
+  testAISettings: (repositoryId: string, settings: Omit<AISettingsInput, "enabled">) =>
+    request<AIConnectionResult>(`/v1/repositories/${repositoryId}/ai-settings/test`, {
+      method: "POST",
+      body: settings,
     }),
   search: (
     repositoryId: string,

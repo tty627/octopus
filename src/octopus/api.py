@@ -6,12 +6,13 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
 from .config import (
@@ -19,13 +20,29 @@ from .config import (
     load_global_config,
     load_repository_config,
     load_repository_state,
+    save_repository_config,
+)
+from .credentials import (
+    CredentialStoreError,
+    delete_stored_ai_api_key,
+    read_stored_ai_api_key,
+    resolve_ai_api_key,
+    save_stored_ai_api_key,
 )
 from .diagnostics import create_diagnostic_bundle
 from .engine import UpdateEngine
 from .migrations import plan_migrations
-from .models import SearchFilters, ServiceJob, TaskPack
+from .models import RepositoryConfig, SearchFilters, ServiceJob, TaskPack
 from .onboarding import estimate_repository
 from .plugin_sdk import reference_plugins_directory, run_plugin
+from .providers import (
+    ProviderAuthError,
+    ProviderOutputError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
+    ProviderTransientError,
+    test_ai_connection,
+)
 from .sample_data import default_sample_paths, materialize_sample_repository
 from .search import SearchIndex
 from .service_control import ensure_service_token
@@ -76,6 +93,46 @@ class RepositoryPreflightRequest(BaseModel):
     raw_path: Path
     index_path: Path
     ai_enabled: bool = False
+
+
+class AISettingsRequest(BaseModel):
+    provider: Literal["deepseek", "openai_compatible"] = "deepseek"
+    base_url: str = Field(min_length=8, max_length=2_048)
+    model: str = Field(min_length=1, max_length=200)
+    api_key: str | None = Field(default=None, max_length=8_192, repr=False)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlparse(normalized)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError("AI base URL must be an HTTP(S) URL without embedded credentials")
+        return normalized
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("AI model cannot be empty")
+        return normalized
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value else ""
+        return normalized or None
+
+
+class AISettingsUpdateRequest(AISettingsRequest):
+    enabled: bool = False
+    clear_api_key: bool = False
 
 
 class SampleRepositoryCreateRequest(BaseModel):
@@ -130,6 +187,56 @@ def _repository_payload(repository_id: str, index: Path) -> dict[str, Any]:
         "states": counts,
         "queues": state.queues.model_dump(mode="json"),
     }
+
+
+def _configured_ai_policy(
+    config: RepositoryConfig,
+    request: AISettingsRequest,
+    *,
+    enabled: bool,
+) -> RepositoryConfig:
+    updated = config.model_copy(deep=True)
+    updated.ai_policy.provider = request.provider
+    updated.ai_policy.base_url = request.base_url
+    updated.ai_policy.model = request.model
+    updated.ai_policy.complex_model = request.model
+    updated.ai_policy.enabled = enabled
+    return updated
+
+
+def _ai_settings_payload(repository_id: str, config: RepositoryConfig) -> dict[str, Any]:
+    try:
+        credential = resolve_ai_api_key(repository_id, config.ai_policy.provider)
+        credential_error = ""
+    except CredentialStoreError:
+        credential = None
+        credential_error = "credential_store_unavailable"
+    return {
+        "repository_id": repository_id,
+        "enabled": config.ai_policy.enabled,
+        "provider": config.ai_policy.provider,
+        "base_url": config.ai_policy.base_url,
+        "model": config.ai_policy.model,
+        "credential_configured": bool(credential and credential.api_key),
+        "credential_source": credential.source if credential else "none",
+        "credential_error": credential_error,
+    }
+
+
+def _ai_connection_error(error: Exception) -> tuple[str, str]:
+    if isinstance(error, ProviderAuthError):
+        return "auth_failed", "API Key 验证失败，请检查密钥是否正确。"
+    if isinstance(error, ProviderQuotaError):
+        return "quota_exhausted", "模型账户余额或配额不足。"
+    if isinstance(error, ProviderRateLimitError):
+        return "rate_limited", "模型服务请求过于频繁，请稍后重试。"
+    if isinstance(error, ProviderTransientError):
+        return "unavailable", "暂时无法连接模型服务，请检查网络和 Base URL。"
+    if isinstance(error, ProviderOutputError):
+        return "invalid_response", "模型服务已连接，但返回格式不符合预期。"
+    if isinstance(error, (ValueError, RuntimeError)):
+        return "invalid_configuration", "模型配置不受支持，请检查服务商和模型名称。"
+    return "unavailable", "模型连接测试没有完成，请稍后重试。"
 
 
 def create_app(
@@ -227,6 +334,7 @@ def create_app(
                 "sample_repository",
                 "task_packs",
                 "task_pack_package",
+                "ai_settings",
             ],
         }
 
@@ -336,6 +444,97 @@ def create_app(
     @app.get("/v1/repositories/{repository_id}", dependencies=authenticated)
     def repository(repository_id: str) -> dict[str, Any]:
         return _repository_payload(repository_id, _repository_path(repository_id))
+
+    @app.get(
+        "/v1/repositories/{repository_id}/ai-settings",
+        dependencies=authenticated,
+    )
+    def ai_settings(repository_id: str) -> dict[str, Any]:
+        config = load_repository_config(_repository_path(repository_id))
+        return _ai_settings_payload(repository_id, config)
+
+    @app.put(
+        "/v1/repositories/{repository_id}/ai-settings",
+        dependencies=authenticated,
+    )
+    def update_ai_settings(
+        repository_id: str,
+        request: AISettingsUpdateRequest,
+    ) -> dict[str, Any]:
+        if request.clear_api_key and request.api_key:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "api_key and clear_api_key cannot be supplied together",
+            )
+        index = _repository_path(repository_id)
+        current = load_repository_config(index)
+        updated = _configured_ai_policy(current, request, enabled=request.enabled)
+        previous_key = ""
+        try:
+            previous_key = read_stored_ai_api_key(repository_id)
+            if request.clear_api_key:
+                delete_stored_ai_api_key(repository_id)
+            elif request.api_key:
+                save_stored_ai_api_key(repository_id, request.provider, request.api_key)
+
+            credential = resolve_ai_api_key(repository_id, request.provider)
+            if request.enabled and not credential.api_key:
+                raise ValueError("An API key is required before AI can be enabled")
+            save_repository_config(index, updated)
+        except (CredentialStoreError, OSError, ValueError) as error:
+            try:
+                if previous_key:
+                    save_stored_ai_api_key(
+                        repository_id,
+                        current.ai_policy.provider,
+                        previous_key,
+                    )
+                elif request.api_key or request.clear_api_key:
+                    delete_stored_ai_api_key(repository_id)
+            except (CredentialStoreError, OSError, ValueError):
+                pass
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Unable to save the AI settings securely",
+            ) from error
+        return _ai_settings_payload(repository_id, updated)
+
+    @app.post(
+        "/v1/repositories/{repository_id}/ai-settings/test",
+        dependencies=authenticated,
+    )
+    def test_ai_settings(
+        repository_id: str,
+        request: AISettingsRequest,
+    ) -> dict[str, Any]:
+        current = load_repository_config(_repository_path(repository_id))
+        candidate = _configured_ai_policy(current, request, enabled=True)
+        try:
+            credential = request.api_key or resolve_ai_api_key(
+                repository_id,
+                request.provider,
+            ).api_key
+            if not credential:
+                return {
+                    "ok": False,
+                    "code": "key_not_configured",
+                    "message": "请先填写 API Key。",
+                }
+            test_ai_connection(candidate, credential)
+        except CredentialStoreError:
+            return {
+                "ok": False,
+                "code": "credential_store_unavailable",
+                "message": "无法读取 Windows 中保存的 API Key。",
+            }
+        except Exception as error:
+            code, message = _ai_connection_error(error)
+            return {"ok": False, "code": code, "message": message}
+        return {
+            "ok": True,
+            "code": "connected",
+            "message": f"已连接 {request.model}。",
+        }
 
     @app.post(
         "/v1/repositories/{repository_id}/updates",

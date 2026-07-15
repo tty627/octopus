@@ -206,7 +206,7 @@ def test_heuristic_and_provider_factory(
     assert heuristic.compose_search("none", []).summary
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     assert isinstance(create_provider(config), HeuristicProvider)
-    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+    with pytest.raises(RuntimeError, match="AI API key"):
         create_provider(config, require_network=True)
 
 

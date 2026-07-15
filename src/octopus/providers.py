@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from collections import Counter
@@ -10,6 +9,7 @@ from typing import Any, NoReturn, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from .credentials import resolve_ai_api_key
 from .models import (
     AIProvider,
     AIUsage,
@@ -63,17 +63,17 @@ OutputModel = TypeVar("OutputModel", bound=BaseModel)
 def classify_provider_error(error: Exception) -> ProviderError:
     status_code = getattr(error, "status_code", None)
     if status_code == 401:
-        return ProviderAuthError("DeepSeek authentication failed (HTTP 401)")
+        return ProviderAuthError("AI provider authentication failed (HTTP 401)")
     if status_code == 402:
-        return ProviderQuotaError("DeepSeek account balance is insufficient (HTTP 402)")
+        return ProviderQuotaError("AI provider account balance is insufficient (HTTP 402)")
     if status_code == 429:
-        return ProviderRateLimitError("DeepSeek rate limit reached (HTTP 429)")
+        return ProviderRateLimitError("AI provider rate limit reached (HTTP 429)")
     if isinstance(status_code, int) and status_code >= 500:
-        return ProviderTransientError(f"DeepSeek service failed (HTTP {status_code})")
+        return ProviderTransientError(f"AI provider service failed (HTTP {status_code})")
     name = type(error).__name__
     if any(token in name for token in ("Timeout", "Connection", "InternalServer")):
-        return ProviderTransientError(f"DeepSeek transport failed ({name})")
-    return ProviderError(f"DeepSeek request failed ({name})")
+        return ProviderTransientError(f"AI provider transport failed ({name})")
+    return ProviderError(f"AI provider request failed ({name})")
 
 
 def _keywords(text: str, limit: int = 8) -> list[str]:
@@ -142,18 +142,19 @@ class HeuristicProvider:
         )
 
 
-class DeepSeekProvider(HeuristicProvider):
+class OpenAICompatibleProvider(HeuristicProvider):
     def __init__(
         self,
         config: RepositoryConfig,
         api_key: str,
         sleeper: Callable[[float], None] = time.sleep,
+        timeout: float = 180.0,
     ) -> None:
         super().__init__()
         try:
             from openai import OpenAI
         except ImportError as error:
-            raise RuntimeError("The openai package is required for DeepSeek") from error
+            raise RuntimeError("The openai package is required for AI providers") from error
         policy = config.ai_policy
         if policy.prompt_version != PROMPT_VERSION:
             raise ValueError(
@@ -164,13 +165,26 @@ class DeepSeekProvider(HeuristicProvider):
             api_key=api_key,
             base_url=policy.base_url,
             max_retries=0,
-            timeout=180.0,
+            timeout=timeout,
         )
         self.policy = policy
         self.model = policy.model
         self.remaining_calls = policy.max_calls_per_run
         self.sleeper = sleeper
         self.fatal_error: ProviderError | None = None
+
+    def test_connection(self) -> None:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Reply with OK."}],
+                max_tokens=8,
+                stream=False,
+            )
+        except Exception as error:
+            raise classify_provider_error(error) from error
+        if not getattr(response, "choices", None):
+            raise ProviderOutputError("AI provider returned no completion choices")
 
     def _stop_for_budget(self, message: str) -> NoReturn:
         error = ProviderBudgetError(message)
@@ -296,7 +310,7 @@ class DeepSeekProvider(HeuristicProvider):
                 self.usage.errors["ProviderOutputError"] = (
                     self.usage.errors.get("ProviderOutputError", 0) + 1
                 )
-                raise ProviderOutputError("DeepSeek returned invalid JSON") from error
+                raise ProviderOutputError("AI provider returned invalid JSON") from error
             return self._json_call(
                 "json_repair",
                 JSON_REPAIR_PROMPT,
@@ -311,7 +325,7 @@ class DeepSeekProvider(HeuristicProvider):
             self.usage.errors["ProviderOutputError"] = (
                 self.usage.errors.get("ProviderOutputError", 0) + 1
             )
-            raise ProviderOutputError("DeepSeek returned invalid structured output") from error
+            raise ProviderOutputError("AI provider returned invalid structured output") from error
 
     def generate_leaf(self, document: ExtractedDocument) -> GeneratedSummary:
         output = self._json_call(
@@ -392,10 +406,35 @@ class DeepSeekProvider(HeuristicProvider):
         return self._validate_output(GeneratedSearchAnswer, output)
 
 
+class DeepSeekProvider(OpenAICompatibleProvider):
+    pass
+
+
+def create_network_provider(
+    config: RepositoryConfig,
+    api_key: str,
+    *,
+    timeout: float = 180.0,
+) -> OpenAICompatibleProvider:
+    provider = config.ai_policy.provider
+    if provider == "deepseek":
+        return DeepSeekProvider(config, api_key, timeout=timeout)
+    if provider == "openai_compatible":
+        return OpenAICompatibleProvider(config, api_key, timeout=timeout)
+    raise ValueError(f"Unsupported AI provider: {provider}")
+
+
+def test_ai_connection(config: RepositoryConfig, api_key: str) -> None:
+    create_network_provider(config, api_key, timeout=20.0).test_connection()
+
+
 def create_provider(config: RepositoryConfig, require_network: bool = False) -> AIProvider:
-    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if config.ai_policy.enabled and key:
-        return DeepSeekProvider(config, key)
+    credential = resolve_ai_api_key(
+        config.repository.raw_repo_id,
+        config.ai_policy.provider,
+    )
+    if config.ai_policy.enabled and credential.api_key:
+        return create_network_provider(config, credential.api_key)
     if require_network:
-        raise RuntimeError("DEEPSEEK_API_KEY is required for this operation")
+        raise RuntimeError("An AI API key is required for this operation")
     return HeuristicProvider()

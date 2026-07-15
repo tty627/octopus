@@ -28,6 +28,7 @@ from .config import (
     resolve_repository,
     save_global_config,
 )
+from .credentials import CredentialStoreError, resolve_ai_api_key
 from .diagnostics import (
     create_diagnostic_bundle,
     diagnostic_summary,
@@ -434,13 +435,6 @@ def doctor(
         checks.append((label, available, module))
     npx = shutil.which("npx") or shutil.which("npx.cmd")
     checks.append(("Markmap runtime", bool(npx), npx or "npx not found"))
-    checks.append(
-        (
-            "DEEPSEEK_API_KEY",
-            bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()),
-            "configured" if os.environ.get("DEEPSEEK_API_KEY") else "not configured",
-        )
-    )
     if sys.platform == "win32":
         checks.append(
             (
@@ -463,6 +457,20 @@ def doctor(
                     config.ai_policy.prompt_version,
                 )
             )
+            try:
+                credential = resolve_ai_api_key(
+                    config.repository.raw_repo_id,
+                    config.ai_policy.provider,
+                )
+                checks.append(
+                    (
+                        "AI API credential",
+                        bool(credential.api_key),
+                        credential.source if credential.api_key else "not configured",
+                    )
+                )
+            except CredentialStoreError:
+                checks.append(("AI API credential", False, "credential store unavailable"))
             cost_configured = config.ai_policy.max_estimated_cost_per_run is None or (
                 config.ai_policy.input_cost_per_million is not None
                 and config.ai_policy.output_cost_per_million is not None
@@ -497,7 +505,7 @@ def doctor(
     if any(
         not okay
         for label, okay, _ in checks
-        if label not in {"DEEPSEEK_API_KEY", "Markmap runtime"}
+        if label not in {"AI API credential", "Markmap runtime"}
     ):
         raise typer.Exit(1)
 

@@ -123,6 +123,13 @@ def load_repository_config(index: Path) -> RepositoryConfig:
     return RepositoryConfig.model_validate(raw)
 
 
+def save_repository_config(index: Path, config: RepositoryConfig) -> None:
+    atomic_write_json(
+        repository_config_path(index),
+        config.model_dump(mode="json", by_alias=True),
+    )
+
+
 def load_repository_state(index: Path, config: RepositoryConfig) -> RepositoryState:
     raw = load_json(repository_state_path(index))
     if raw is None:

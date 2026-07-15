@@ -8,9 +8,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from octopus import __version__
+from octopus import api as api_module
 from octopus.api import create_app
-from octopus.config import repository_config_path
+from octopus.config import load_repository_config, repository_config_path
+from octopus.credentials import ResolvedCredential
 from octopus.engine import UpdateEngine
+from octopus.providers import ProviderAuthError
 
 TOKEN = "test-token-that-is-long-enough-for-api-authentication"
 
@@ -303,3 +306,131 @@ def test_v1_contract_and_repository_creation_workflow(
         assert set(openapi["paths"]["/v1/repositories"]) == {"get", "post"}
 
     assert source.read_bytes() == before
+
+
+def test_ai_settings_store_secret_outside_repository_config(
+    repository: tuple[Path, Path, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, index, config = repository
+    repository_id = config.repository.raw_repo_id
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    stored: dict[str, str] = {}
+    tested: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        api_module,
+        "read_stored_ai_api_key",
+        lambda value: stored.get(value, ""),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "save_stored_ai_api_key",
+        lambda value, provider, key: stored.__setitem__(value, key),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "delete_stored_ai_api_key",
+        lambda value: stored.pop(value, None),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "resolve_ai_api_key",
+        lambda value, provider: ResolvedCredential(
+            stored.get(value, ""),
+            "windows_credential" if stored.get(value) else "none",
+        ),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "test_ai_connection",
+        lambda candidate, key: tested.append((candidate.ai_policy.model, key)),
+    )
+
+    app = create_app(token=TOKEN, start_scheduler=False)
+    with TestClient(app) as client:
+        initial = client.get(
+            f"/v1/repositories/{repository_id}/ai-settings",
+            headers=headers,
+        )
+        assert initial.status_code == 200
+        assert initial.json()["credential_configured"] is False
+
+        missing = client.post(
+            f"/v1/repositories/{repository_id}/ai-settings/test",
+            headers=headers,
+            json={
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-test",
+            },
+        )
+        assert missing.json()["code"] == "key_not_configured"
+
+        connection = client.post(
+            f"/v1/repositories/{repository_id}/ai-settings/test",
+            headers=headers,
+            json={
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-test",
+                "api_key": "private-test-key",
+            },
+        )
+        assert connection.json()["ok"] is True
+        assert tested == [("deepseek-test", "private-test-key")]
+        assert stored == {}
+
+        saved = client.put(
+            f"/v1/repositories/{repository_id}/ai-settings",
+            headers=headers,
+            json={
+                "enabled": True,
+                "provider": "openai_compatible",
+                "base_url": "https://models.example.com/v1",
+                "model": "example-model",
+                "api_key": "private-test-key",
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["credential_configured"] is True
+        assert "private-test-key" not in saved.text
+        assert stored[repository_id] == "private-test-key"
+
+        loaded = load_repository_config(index)
+        assert loaded.ai_policy.enabled is True
+        assert loaded.ai_policy.provider == "openai_compatible"
+        assert loaded.ai_policy.base_url == "https://models.example.com/v1"
+        assert loaded.ai_policy.model == "example-model"
+        assert "private-test-key" not in repository_config_path(index).read_text(encoding="utf-8")
+
+        monkeypatch.setattr(
+            api_module,
+            "test_ai_connection",
+            lambda candidate, key: (_ for _ in ()).throw(ProviderAuthError("auth")),
+        )
+        rejected = client.post(
+            f"/v1/repositories/{repository_id}/ai-settings/test",
+            headers=headers,
+            json={
+                "provider": "openai_compatible",
+                "base_url": "https://models.example.com/v1",
+                "model": "example-model",
+            },
+        )
+        assert rejected.json()["code"] == "auth_failed"
+
+        cleared = client.put(
+            f"/v1/repositories/{repository_id}/ai-settings",
+            headers=headers,
+            json={
+                "enabled": False,
+                "provider": "openai_compatible",
+                "base_url": "https://models.example.com/v1",
+                "model": "example-model",
+                "clear_api_key": True,
+            },
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["credential_configured"] is False
+        assert stored == {}
