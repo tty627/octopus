@@ -261,6 +261,31 @@ def test_webview_bridge_only_exposes_whitelisted_public_state() -> None:
     }
 
 
+def test_webview_bridge_persists_v1_and_v2_navigation_state() -> None:
+    bridge = DesktopBridge(LocalApiClient("http://127.0.0.1:9876", "memory-token"))
+
+    assert bridge.save_ui_state(
+        {
+            "page": "tasks",
+            "workspace_id": "workspace-v2",
+            "task_id": "task-v2",
+            "repository_id": "repository-v1",
+            "task_pack_id": "task-pack-v1",
+            "window": {"width": 1440, "height": 900},
+            "token": "must-not-be-persisted",
+        }
+    ) == {"saved": True}
+
+    assert bridge.load_ui_state() == {
+        "page": "tasks",
+        "workspace_id": "workspace-v2",
+        "task_id": "task-v2",
+        "repository_id": "repository-v1",
+        "task_pack_id": "task-pack-v1",
+        "window": {"width": 1440, "height": 900},
+    }
+
+
 def test_desktop_presentation_layer_has_no_tkinter_or_repository_core() -> None:
     source = inspect.getsource(desktop_shell_module)
     assert "tkinter" not in source

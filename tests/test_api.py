@@ -46,6 +46,7 @@ def test_local_api_auth_repository_search_and_jobs(
         ui = client.get("/ui/")
         assert ui.status_code == 200
         assert "default-src 'self'" in ui.headers["content-security-policy"]
+        assert "img-src 'self' data: blob:" in ui.headers["content-security-policy"]
         assert "http://" not in ui.text and "https://" not in ui.text
         assert client.get("/v1/repositories").status_code == 401
         assert (

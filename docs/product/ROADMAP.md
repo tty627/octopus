@@ -17,10 +17,11 @@
 | [v0.9](../releases/v0.9.md) | 工程 RC 已完成 | Release Candidate | v0.8 | 无 P0/P1，契约冻结和工程发布审计通过 |
 | [v1.0](../releases/v1.0.md) | 工程最终版本已完成 | 正式版目标 | v0.9 | 源码/契约/工件工程门禁通过；签名/真人外部发布未声称 |
 | [v1.1](../releases/v1.1.md) | 核心闭环开发版 | 本地资料导航与任务装配工作台 | v1.0、Local API v1 | WebView2 桌面端、搜索证据闭环、持久任务包与 unsigned 安装验证通过 |
+| V2 development | 当前开发预览 | 原始资料搜索与可信页面证据 | PDFium、OCR、SQLite/FTS5、Local API V2 | PDF/文本导入、搜索、页面预览、任务和 Markdown 导出闭环通过 |
 
 ## 当前焦点
 
-当前焦点是 `2.0.0.dev0` 的本地证据闭环：隐藏 SQLite 资料空间、PDF 页面检索、证据检查器、任务、
-Markdown/Package 导出与基础健康恢复。最近变化、完整新鲜度差异、关系图、Agent 交接、跨资料
-空间搜索和独立 Markmap HTML 留到后续阶段。签名、干净机/Defender、正式 Tag/GitHub Release
-和真人角色仍明确列为未执行外部门槛，不与本轮开发安装验证混淆。
+当前焦点是 `2.0.0.dev1` 的本地证据闭环：隐藏 SQLite 资料空间、PDF 页面检索、证据检查器、任务、
+Markdown 导出与基础健康恢复。Office 深度正文解析、最近变化、完整新鲜度差异、关系图、Agent 交接、跨资料
+空间搜索和独立 Markmap HTML 留到后续阶段。开发预发布由版本 Tag 的 Windows CI 自动生成；签名正式版、
+干净机/Defender 和真人角色仍是后续外部门槛，不与本轮开发安装验证混淆。

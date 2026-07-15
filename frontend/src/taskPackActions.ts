@@ -1,10 +1,14 @@
+import { useCallback, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { api } from "./api";
-import { useAppStore } from "./store";
-import type { SearchResultV2, WorkspaceTask } from "./types";
+import { ApiError, api } from "./api";
+import { clearLocalDraft, saveLocalDraft, useAppStore } from "./store";
+import type { SearchResultV2, WorkspaceEvidence, WorkspaceTask } from "./types";
 
-export function appendEvidence(task: WorkspaceTask, result: SearchResultV2): WorkspaceTask {
-  const evidence = result.best_evidence;
+export function appendEvidence(
+  task: WorkspaceTask,
+  result: SearchResultV2,
+  evidence: WorkspaceEvidence = result.best_evidence,
+): WorkspaceTask {
   const duplicate = task.items.some((item) =>
     item.document_id === result.document_id &&
     item.page_number === evidence.page_number &&
@@ -39,26 +43,70 @@ export function appendEvidence(task: WorkspaceTask, result: SearchResultV2): Wor
 }
 
 export function useTaskActions() {
-  const workspaceId = useAppStore((state) => state.workspaceId);
-  const activeTask = useAppStore((state) => state.activeTask);
-  const setTask = useAppStore((state) => state.setTask);
-  const query = useAppStore((state) => state.query);
   const queryClient = useQueryClient();
+  const queue = useRef<Promise<void>>(Promise.resolve());
+  const pendingCount = useRef(0);
+  const [adding, setAdding] = useState(false);
+  const [actionError, setActionError] = useState("");
 
-  const addResult = async (result: SearchResultV2, defaultTitle?: string) => {
-    if (!workspaceId) return;
-    let task = activeTask;
-    if (!task) {
-      task = await api.createTask(
-        workspaceId,
-        defaultTitle || query.trim() || "资料核对任务",
-        query.trim(),
+  const addResult = useCallback(async (
+    result: SearchResultV2,
+    evidence: WorkspaceEvidence = result.best_evidence,
+    defaultTitle?: string,
+    sourceWorkspaceId = useAppStore.getState().workspaceId,
+  ) => {
+    if (!sourceWorkspaceId) return;
+    pendingCount.current += 1;
+    setAdding(true);
+    setActionError("");
+
+    const operation = queue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const state = useAppStore.getState();
+        if (state.workspaceId !== sourceWorkspaceId) {
+          throw new ApiError("资料空间已切换，这条证据没有加入任务。", 409);
+        }
+
+        let task = state.activeTask;
+        if (!task) {
+          const sourceQuery = state.submittedQuery.trim() || state.query.trim();
+          task = await api.createTask(
+            sourceWorkspaceId,
+            defaultTitle || sourceQuery || "资料核对任务",
+            sourceQuery,
+          );
+          await queryClient.invalidateQueries({ queryKey: ["tasks", sourceWorkspaceId] });
+        }
+
+        const updated = appendEvidence(task, result, evidence);
+        if (useAppStore.getState().workspaceId !== sourceWorkspaceId) {
+          if (updated !== task) {
+            saveLocalDraft(updated);
+            await api.saveTask(updated);
+            clearLocalDraft(updated);
+          }
+          return;
+        }
+        const latestState = useAppStore.getState();
+        latestState.setTask(updated, latestState.taskDirty || updated !== task);
+      });
+    queue.current = operation.catch(() => undefined);
+
+    try {
+      await operation;
+    } catch (reason) {
+      setActionError(
+        reason instanceof ApiError
+          ? reason.message
+          : "证据没有加入任务，请重试。",
       );
-      await queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
+    } finally {
+      pendingCount.current -= 1;
+      if (pendingCount.current === 0) setAdding(false);
     }
-    const updated = appendEvidence(task, result);
-    setTask(updated, updated !== task);
-  };
+  }, [queryClient]);
 
-  return { addResult };
+  const clearActionError = useCallback(() => setActionError(""), []);
+  return { addResult, adding, actionError, clearActionError };
 }

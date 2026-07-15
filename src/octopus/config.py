@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import (
@@ -13,6 +16,15 @@ from .models import (
     RepositoryState,
 )
 from .utils import atomic_write_json, load_json
+
+_GLOBAL_CONFIG_LOCK = threading.RLock()
+
+
+@contextmanager
+def global_config_lock() -> Iterator[None]:
+    """Serialize in-process global-config read/modify/write transactions."""
+    with _GLOBAL_CONFIG_LOCK:
+        yield
 
 
 def global_config_path() -> Path:
@@ -52,12 +64,14 @@ def repository_state_path(index_repository: Path) -> Path:
 
 
 def load_global_config() -> GlobalConfig:
-    raw = load_json(global_config_path(), {})
-    return GlobalConfig.model_validate(raw or {})
+    with _GLOBAL_CONFIG_LOCK:
+        raw = load_json(global_config_path(), {})
+        return GlobalConfig.model_validate(raw or {})
 
 
 def save_global_config(config: GlobalConfig) -> None:
-    atomic_write_json(global_config_path(), config.model_dump(mode="json"))
+    with _GLOBAL_CONFIG_LOCK:
+        atomic_write_json(global_config_path(), config.model_dump(mode="json"))
 
 
 def validate_repository_paths(raw: Path, index: Path) -> tuple[Path, Path]:
@@ -110,14 +124,15 @@ def create_repository(
     try:
         atomic_write_json(config_path, config.model_dump(mode="json", by_alias=True))
         atomic_write_json(state_path, state.model_dump(mode="json", by_alias=True))
-        global_config = load_global_config()
-        global_config.repositories[repo_id] = GlobalRepository(
-            raw_repo_id=repo_id,
-            name=config.repository.repository_name,
-            index_repository_path=str(index),
-        )
-        global_config.active_repository_id = repo_id
-        save_global_config(global_config)
+        with global_config_lock():
+            global_config = load_global_config()
+            global_config.repositories[repo_id] = GlobalRepository(
+                raw_repo_id=repo_id,
+                name=config.repository.repository_name,
+                index_repository_path=str(index),
+            )
+            global_config.active_repository_id = repo_id
+            save_global_config(global_config)
     except Exception:
         config_path.unlink(missing_ok=True)
         state_path.unlink(missing_ok=True)

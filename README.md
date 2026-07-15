@@ -1,222 +1,138 @@
 # Octopus
 
-Octopus 是一款面向本地文件的资料检索与任务整理工具。它把散落在文件夹里的 PDF、Office 文档、图片、Markdown 和代码文件整理成一个可搜索、可核验、可交付的资料空间。
+Octopus 是一个 Windows 本地证据工作台。它不生成一堆需要用户理解的索引文件，而是直接搜索原始资料，并把结果定位到可以核验的文件、页面和正文片段。
 
-它不是一个只给答案的聊天机器人。Octopus 更关注答案从哪里来：每条搜索结果都会保留原文件路径、页码、工作表、段落或 OCR 位置等证据，用户确认后再把资料加入任务包，最终导出为结构化 Markdown 或独立文件包。
+当前开发版本为 `2.0.0.dev1`，主要面向这些场景：
 
-整个过程默认在本机完成。Octopus 不会修改你的原始资料，也不会自动上传文件。
+- 在课程、项目或下载资料中快速找到真正相关的文件；
+- 打开 PDF 的命中页面核对原文，而不是阅读不可追溯的摘要；
+- 把确认过的页面和文本收集成任务；
+- 将任务导出为包含来源、页码和证据片段的 Markdown。
 
-## 它能解决什么问题
+原始资料始终只读。搜索缓存放在 Local AppData，任务放在 Roaming AppData。未获得当前资料空间的明确授权时，页面图像不会发送给视觉模型。
 
-当项目资料越来越多时，真正困难的通常不是“有没有这个文件”，而是：
+## 下载与安装
 
-- 最终版本究竟是哪一份；
-- 某个结论来自哪一页、哪个表格或哪次会议；
-- 准备汇报、审计或交付时应该收集哪些资料；
-- 搜索到的内容是否可靠，是否还需要人工核验；
-- 如何把查找结果整理成一个可以继续使用和交付的资料集合。
+在 [GitHub Releases](https://github.com/tty627/octopus/releases) 下载当前版本：
 
-Octopus 将这些步骤整合为一条工作流：
+- `Octopus-<版本>-win-x64-setup.exe`：普通安装包；
+- `Octopus-<版本>-win-x64-portable.zip`：解压后直接运行 `Octopus.exe`；
+- `SHA256SUMS.txt`：下载文件校验值。
 
-1. 选择资料文件夹，建立只读资料空间；
-2. 在本机生成独立索引，不改动原始目录；
-3. 搜索文件名、正文、项目、人名、时间或任务描述；
-4. 在证据检查器中核对命中原因和原文位置；
-5. 将确认过的资料加入任务包并分类整理；
-6. 导出 Markdown 大纲或经过再次确认的文件副本。
+当前 `dev` 版本未签名，Windows 可能显示 SmartScreen 提示。安装与校验步骤见 [Windows 安装说明](docs/user/WINDOWS_INSTALLATION.md)。
 
-## 核心功能
+## 实际使用流程
 
-### 本地资料空间
+### 1. 添加资料空间
 
-- 通过三步向导选择资料目录、检查文件规模并建立索引；
-- Raw 原始资料与 Index 索引目录严格分离；
-- 建立索引前显示文件数量、支持格式、磁盘空间、阻断项和警告；
-- 支持示例资料，新用户无需准备文件即可体验完整流程；
-- 首批结果可用后即可开始搜索，剩余索引在后台继续处理。
+首次启动时只需要选择原始资料文件夹，并填写一个便于识别的名称。Octopus 会自动创建内部缓存，不再要求用户选择或管理 Index 目录。
 
-### 可核验搜索
+创建后会直接进入“资料”页。同步在后台执行，页面持续显示当前文件、处理阶段、完成数量和失败数量。原文件不会被移动、重命名或修改。
 
-- 本地结果优先返回，不依赖网络或 API Key；
-- 结果确定性分为“核心资料、相关文件夹、补充资料、需要核验”；
-- 支持按文件类型、路径、状态、质量和修改时间筛选；
-- 证据检查器展示摘要、命中原因、文件路径、更新时间和内容标识；
-- PDF 页码、Excel Sheet、文档段落、幻灯片和 OCR 区域都可以作为证据位置；
-- 单击结果只查看证据，只有明确确认后才会加入任务包。
+### 2. 搜索原始资料
 
-### 任务包
-
-任务包用于把一次搜索变成一个可以继续编辑和交付的资料集合。
-
-- 默认提供“核心资料、补充资料、待核验”三个槽位；
-- 支持新增、删除、改名和拖动排序；
-- 保存加入原因、证据锚点、来源状态和确认状态；
-- 草稿自动保存，服务暂时断开时会保留本地编辑；
-- 多处编辑发生版本冲突时，可以重新载入或保留本地草稿；
-- 删除任务包实际执行归档，避免误删工作成果；
-- 可导出兼容 Markmap 的 Markdown；
-- Package 导出只复制用户再次勾选的已确认资料，待核验项目默认不选中。
-
-### 可选 AI 辅助
-
-AI 只用于对已有候选结果进行重排和解释，不负责替代本地索引，也不能自动把资料标记为“已确认”。
-
-没有 API Key、网络不可用或 AI 返回无效引用时，Octopus 会保留完整的本地结果并自动降级。所有 AI 内容都会明确标记为“AI 建议”。
-
-桌面端可在“设置 > AI 服务”中直接填写 Base URL、模型和 API Key。密钥保存到 Windows 凭据管理器，不写入资料空间配置。
-
-### 健康检查与恢复
-
-资料空间页面提供同步、失败重试、完整性校验、搜索缓存重建和本地诊断。正常状态只显示最近同步时间，只有来源不可访问、索引异常或任务失败时才会突出提醒。
-
-## 与普通 RAG / GraphRAG 工具的区别
-
-Octopus 不把产品中心放在“和文档聊天”上，而是放在可验证的资料工作流上：
-
-- **原始资料只读**：索引、任务包和运行状态全部保存在独立目录；
-- **证据优先**：搜索结果必须能回到具体文件和证据位置；
-- **用户确认**：AI 可以建议，但不能替用户确认资料；
-- **面向交付**：搜索结果可以继续整理为任务包，而不是停留在一次问答；
-- **本地可恢复**：索引可校验、重建和诊断，服务断开不会直接丢失草稿；
-- **渐进式使用**：不启用 AI 也能完成索引、搜索、核验和导出。
-
-Octopus 当前不试图生成一个覆盖所有资料的复杂知识图谱。它优先解决更常见的问题：快速找到资料、判断是否可信，并整理成可实际使用的成果。
-
-## 支持的文件
-
-Octopus 可以处理：
-
-- PDF，包括扫描页 OCR；
-- Word：`.docx`；
-- Excel：`.xlsx`、`.xlsm`；
-- PowerPoint：`.pptx`；
-- 图片：PNG、JPEG、BMP、GIF、TIFF、WebP；
-- 文本与数据：TXT、Markdown、CSV、JSON、YAML、TOML、XML、HTML；
-- 常见代码文件：Python、JavaScript、TypeScript、Java、Go、Rust、C/C++、Shell、PowerShell、SQL 等。
-
-不支持内容抽取的文件仍可作为元数据节点进入索引，并会明确标记质量状态。
-
-## 最简单的安装与启动
-
-当前开发版本为 `2.0.0.dev0`，正式支持 Windows 11 x64。应用使用系统 WebView2 Runtime；如果电脑缺少该组件，启动时会显示安装指引。
-
-Windows 安装包已经包含 Python、文档解析器和本地 OCR 运行环境。普通用户不需要单独安装 Python、Node.js 或配置 API Key。
-
-普通用户不需要部署源码。发布文件提供两种入口：
-
-- `Octopus-<版本>-win-x64-setup.exe`：双击安装，然后从开始菜单启动；
-- `Octopus-<版本>-win-x64-portable.zip`：解压后直接双击 `Octopus.exe`，无需安装。
-
-如果 GitHub 暂时没有可下载的 Release，也不需要手工部署：点击 **Code → Download ZIP**，解压后双击根目录的 `start-octopus.cmd`。首次运行会自动选择 64 位 Python 3.12+、创建本地虚拟环境并安装依赖；电脑没有兼容 Python 时，会通过 Windows Package Manager 为当前用户自动安装。后续启动不会重复安装。这个入口不需要 Git、Node.js，也不需要执行 `Activate.ps1`。
-
-`2.0.0.dev0` 当前提供的是未签名开发安装包，Windows 可能显示 SmartScreen 提示。发布文件应使用仓库提供的 `SHA256SUMS.txt` 校验完整性。
-
-详细步骤见 [Windows 安装与首次运行](docs/user/WINDOWS_INSTALLATION.md)。
-
-## 基本使用
-
-首次启动只需选择原始资料文件夹。Octopus 会把可重建缓存放入 Local AppData，把任务保存到 Roaming AppData，不要求选择索引目录。
-
-在“搜索”中输入文件名、章节或正文线索，例如：
+“搜索”是应用的第一入口。可以输入：
 
 ```text
 微分方程
 级数
-一阶线性方程
+项目预算
 ```
 
-搜索完成后：
+搜索结果按文件名、章节标题和正文证据分层排序。每个文件只出现一次，并显示：
 
-1. 单击结果，在右侧检查摘要、来源和证据位置；
-2. 点击“打开来源”查看原始文件；
-3. 点击“加入任务包”确认使用这项资料；
-4. 在底部托盘或任务包页面调整分类和顺序；
-5. 导出 Markdown，或再次勾选后导出 Package。
+- 人类可读的命中原因；
+- 页码或文本位置；
+- 可核验的正文片段；
+- 正文质量状态；
+- 文件大小和相对路径。
 
-常用快捷键：
+文件夹不会作为普通结果，内部字段、索引路径和 V1 `Leaf/FolderNode` 类型不会显示在界面中。
 
-- `Ctrl+F`：聚焦搜索；
-- `Ctrl+N`：打开任务包；
-- `Ctrl+Enter`：将当前证据加入任务包；
-- `Esc`：关闭窄窗口中的证据抽屉。
+### 3. 核对页面证据
 
-完整说明见 [用户指南](docs/user/USER_GUIDE.md)。
+选择 PDF 结果后，右侧检查器通过认证接口读取真实页面 PNG，可以前后翻页并核对命中片段。数学公式以原始页面图像为准，Octopus 不会伪造 LaTeX。
 
-## 命令行使用
+文本文件会显示定位到的原文片段。无法可靠定位页码时，界面会明确说明，不会猜测页码。
 
-安装版同时提供 `octopus` 命令。桌面端和 CLI 使用同一套索引引擎与资料空间配置。
+### 4. 加入任务并导出
 
-```powershell
-octopus version
-octopus doctor
+点击“加入任务”后，当前文件和证据位置会进入任务。任务项保存文档身份、内容哈希、页码和摘录，不依赖旧索引节点 ID。
 
-octopus init --raw "D:\ProjectFiles" --index "D:\ProjectFiles-Octopus-Index" --name "项目资料"
-octopus update --once
-octopus search "最终版报价"
-octopus search "季度项目进展" --format json --open-result 1
-octopus validate --format json
-octopus report --last --format markdown
-octopus rebuild-search
-```
+任务页可以：
 
-桌面端可直接通过设置页配置 AI。命令行也可以继续使用环境变量提供密钥：
+- 编辑任务名称和目标；
+- 将证据分为核心证据、补充证据和待核验；
+- 确认或移除证据；
+- 导出包含来源状态、页码、用途和摘录的 Markdown。
 
-```powershell
-$env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key" -MaskInput
-octopus search --mode auto "整理项目风险和对应证据"
-```
+任务保存在 `%APPDATA%\Octopus\workspaces\<workspace_id>\tasks`。可重建搜索缓存损坏或被删除时，任务不会随之丢失。
 
-## 数据保存在哪里
+### 5. 查看资料健康状态
 
-假设原始资料目录是 Raw，索引目录是 Index：
+“资料”页显示文档总数、正文可读、部分可读、识别质量低、仅文件信息和处理失败数量。可以同步整个资料空间，也可以强制重新处理单个文件。
+
+PDF 页面依次使用 PDFium 文本、PyPDF 备用提取和本地 OCR。低质量正文不会生成摘要，也不会参与正文排名；文件名和元数据仍可搜索。
+
+## 当前格式支持
+
+| 类型 | `2.0.0.dev1` 能力 |
+| --- | --- |
+| PDF | 逐页文本提取、本地 OCR、质量评分、正文搜索、页面预览 |
+| TXT、Markdown、CSV、JSON、YAML、代码等文本 | 编码识别、正文搜索、文本证据 |
+| Word、Excel、PowerPoint | 文件名和元数据搜索；深度正文解析将在后续版本接入 |
+| PNG、JPEG 等图片 | 文件名和元数据搜索；页面视觉处理仅在明确授权后使用 |
+
+“仅文件信息”不是处理失败。它表示当前版本尚未对该格式抽取正文，但文件仍可以按名称和路径找到。
+
+## 可选 AI 辅助
+
+AI 不是搜索前提。默认本地模式可以完成导入、搜索、页面核对、任务整理和导出。
+
+启用辅助整理后，AI 只能在本地已经检索到的候选中重排或总结，不能添加未检索到的文件，也不能改变文件名精确匹配的最高优先级。API Key 保存在 Windows 凭据管理器，不写入资料空间。
+
+“允许发送疑难页面图像”是单独的资料空间授权。关闭时只使用 PDF 文本提取和本地 OCR，网络层不得发送页面图片。
+
+## 数据位置
 
 ```text
-Raw/
-  原始文件，由用户管理，Octopus 只读
+原始资料文件夹/
+  用户文件，Octopus 只读
 
-Index/
-  生成的 Markdown 索引
-  .octopus/
-    repository-config.json
-    repository-state.json
-    search.sqlite3
-    task-packs/
-    runs/
-    transactions/
+%LOCALAPPDATA%\Octopus\workspaces\<workspace_id>\
+  workspace.sqlite3       可重建的文档、页面、正文和 FTS5 缓存
+  previews\               按内容哈希缓存的页面 PNG
+
+%APPDATA%\Octopus\
+  config.json             资料空间与本地服务配置
+  service-token           本地 API 凭据
+  ui-state.json           桌面导航状态
+  workspaces\<workspace_id>\tasks\
+                          不可丢失的用户任务
 ```
 
-`search.sqlite3` 是可重建的搜索缓存。任务包保存在 `<Index>/.octopus/task-packs/`。卸载 Octopus 不会删除 Raw、Index 或 `%APPDATA%\Octopus` 中的用户配置，重新安装后可以重新发现已有资料空间。
+V1 `*-Octopus-Index` 目录只作为回滚和迁移来源记录。V2 不会继续同步、修改或向普通用户展示这些目录。
 
-## 隐私与安全边界
+## 隐私与安全
 
-- Octopus 默认只监听本机回环地址；
-- Local API 使用每次进程启动生成的 Bearer token；
-- token 只通过受限桌面桥保存在内存中，不写入前端存储；
+- 本地 API 只监听回环地址，并要求 Bearer token；
 - 生产界面不加载远程脚本、字体或图片；
-- 诊断默认留在本机，不会自动上传；
-- Package 导出必须由用户再次确认文件和目标目录；
-- Raw 目录在正常索引、搜索、任务包和诊断流程中保持只读。
-
-## 当前范围
-
-Octopus 当前主要支持 Windows 11 x64 和单资料空间任务包。跨资料空间搜索、最近变化时间线、关系图、Agent 交接以及独立 Markmap HTML 尚未包含在当前桌面版本中。
+- 原始资料、内部缓存和任务默认不上传；
+- 诊断和导出由用户明确发起；
+- 页面图像授权按资料空间保存，默认关闭；
+- 卸载应用不会删除原始资料或 Roaming AppData 中的任务。
 
 ## 从源码运行
 
-只运行现有桌面端时，推荐直接双击：
+普通源码体验可以双击：
 
 ```text
 start-octopus.cmd
 ```
 
-也可以在 PowerShell 中执行同一个入口：
+该入口会准备兼容的 64 位 Python 和虚拟环境。前端构建产物已包含在仓库中，普通运行不需要 Node.js。
 
-```powershell
-.\start-octopus.cmd
-.\start-octopus.cmd -SetupOnly
-```
-
-前端构建产物已经包含在仓库中，因此普通源码运行只需要 Python 3.12+，不需要 Node.js。下面是等价的手动步骤：
+手动启动：
 
 ```powershell
 py -3.12 -m venv .venv
@@ -224,32 +140,39 @@ py -3.12 -m venv .venv
 .venv\Scripts\octopus-gui.exe
 ```
 
-只有修改前端或运行完整开发检查时才需要 Node.js 22：
+修改前端或运行完整检查时需要 Node.js 22：
 
 ```powershell
 Set-Location frontend
 npm ci
-npm run dev
-```
-
-运行主要检查：
-
-```powershell
-pytest --cov=octopus --cov-report=term-missing
-ruff check .
-mypy src
-
-Set-Location frontend
 npm run lint
 npm run typecheck
 npm test
+npm run e2e
+npm run build
+
+Set-Location ..
+.venv\Scripts\python.exe -m pytest --cov=octopus --cov-report=term-missing
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m mypy src/octopus
 ```
 
-## 相关文档
+Windows 完整打包：
 
-- [用户指南](docs/user/USER_GUIDE.md)
-- [Windows 安装说明](docs/user/WINDOWS_INSTALLATION.md)
+```powershell
+.\packaging\build_windows.ps1
+```
+
+## API 与兼容性
+
+桌面端使用认证的本地 V2 API。V1 路由在当前版本中继续保留，用于并行回滚和旧 CLI 兼容。
+
+- [Local API V2](docs/api/LOCAL_API_V2.md)
+- [Local API V1 回滚参考](docs/api/LOCAL_API_V1.md)
+- [兼容性矩阵](docs/product/COMPATIBILITY_MATRIX.md)
+- [路线图](docs/product/ROADMAP.md)
 - [故障排查](docs/user/TROUBLESHOOTING.md)
-- [Local API v1](docs/api/LOCAL_API_V1.md)
-- [产品设计方案](docs/product/OCTOPUS_PRODUCT_DESIGN_PROPOSAL.md)
-- [前端 UI/UX 设计草案](docs/product/OCTOPUS_FRONTEND_UI_UX_DRAFT.md)
+
+## 发布状态
+
+`2.0.0.dev1` 是 Windows 开发预览版。PDF/文本证据闭环是本里程碑的主要验收范围；Office 深度正文解析、签名安装包和更广泛的干净机器验证仍属于后续发布门禁。

@@ -35,6 +35,7 @@ const result = (overrides: Partial<SearchResultV2> = {}): SearchResultV2 => ({
   page_count: 12,
   readability: "readable",
   readability_score: 0.9,
+  indexing_state: "indexed",
   source_uri: "file:///C:/Raw/source.pdf",
   overview: "Evidence",
   best_evidence: {

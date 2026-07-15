@@ -67,6 +67,7 @@ export interface SearchResultV2 {
   page_count: number;
   readability: Readability;
   readability_score: number;
+  indexing_state: IndexingState;
   source_uri: string;
   overview: string;
   best_evidence: WorkspaceEvidence;
@@ -173,12 +174,35 @@ export interface WorkspaceTaskSummary {
   writable: boolean;
 }
 
+export interface WorkspaceJobProgress {
+  phase?: "discovering" | "processing" | "finalizing" | "completed";
+  discovered?: number;
+  processed?: number;
+  current_file?: string;
+  current_page?: number;
+  page_count?: number;
+  pages_completed?: number;
+  ocr_pages_completed?: number;
+  extraction_stage?: "pdfium" | "pypdf" | "ocr" | "page_complete";
+  indexed?: number;
+  unchanged?: number;
+  failed?: number;
+  removed?: number;
+}
+
+export interface ServiceJobResult extends Record<string, unknown> {
+  progress?: WorkspaceJobProgress;
+}
+
 export interface ServiceJob {
   job_id: string;
   repository_id: string;
   kind: "workspace_sync" | "update" | "rebuild_search" | "validate" | "package";
   status: "queued" | "running" | "succeeded" | "failed";
-  result: Record<string, unknown>;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  result: ServiceJobResult;
   error_code: string;
   error_message: string;
 }

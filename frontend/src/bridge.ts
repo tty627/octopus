@@ -43,7 +43,7 @@ export async function bootstrapDesktop(): Promise<BootstrapPayload> {
     return {
       base_url: "mock://octopus",
       token: "development-memory-token",
-      product_version: "2.0.0.dev0",
+      product_version: "2.0.0.dev1",
       platform: "browser-demo",
     };
   }
@@ -53,7 +53,7 @@ export async function bootstrapDesktop(): Promise<BootstrapPayload> {
     return {
       base_url: "mock://octopus",
       token: "development-memory-token",
-      product_version: "2.0.0.dev0",
+      product_version: "2.0.0.dev1",
       platform: "browser-demo",
     };
   }

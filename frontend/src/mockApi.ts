@@ -55,6 +55,7 @@ const result = (
   page_count: name.endsWith(".pdf") ? 36 : 0,
   readability: "readable",
   readability_score: 0.93,
+  indexing_state: "indexed",
   source_uri: `file:///C:/Users/Demo/Documents/${encodeURIComponent(relativePath)}`,
   overview: excerpt,
   best_evidence: evidence(page, page ? "正文包含查询内容" : "文件名包含查询内容", excerpt),
@@ -112,7 +113,7 @@ const documents: WorkspaceDocument[] = allResults.map((item) => ({
   page_count: item.page_count,
   readability: item.readability,
   readability_score: item.readability_score,
-  indexing_state: "indexed",
+  indexing_state: item.indexing_state,
   error: "",
   source_uri: item.source_uri,
 }));
@@ -130,6 +131,7 @@ let aiSettings: AISettingsV2 = {
 };
 
 let tasks: WorkspaceTask[] = [];
+const serviceJobs: ServiceJob[] = [];
 
 function createTask(title: string, goal: string): WorkspaceTask {
   const task: WorkspaceTask = {
@@ -201,15 +203,53 @@ function searchReport(query: string, mode: "local" | "assisted"): SearchReportV2
 }
 
 function job(): ServiceJob {
-  return {
+  const createdAt = new Date().toISOString();
+  const value: ServiceJob = {
     job_id: crypto.randomUUID(),
     repository_id: workspace.workspace_id,
     kind: "workspace_sync",
-    status: "succeeded",
-    result: {},
+    status: "queued",
+    created_at: createdAt,
+    started_at: "",
+    finished_at: "",
+    result: {
+      progress: {
+        phase: "discovering",
+        discovered: documents.length,
+        processed: 0,
+        indexed: 0,
+        unchanged: 0,
+        failed: 0,
+        removed: 0,
+      },
+    },
     error_code: "",
     error_message: "",
   };
+  serviceJobs.unshift(value);
+  window.setTimeout(() => {
+    const index = serviceJobs.findIndex((item) => item.job_id === value.job_id);
+    if (index < 0) return;
+    const finishedAt = new Date().toISOString();
+    serviceJobs[index] = {
+      ...value,
+      status: "succeeded",
+      started_at: createdAt,
+      finished_at: finishedAt,
+      result: {
+        progress: {
+          phase: "completed",
+          discovered: documents.length,
+          processed: documents.length,
+          indexed: documents.length,
+          unchanged: 0,
+          failed: 0,
+          removed: 0,
+        },
+      },
+    };
+  }, 80);
+  return value;
 }
 
 export function mockPreviewUrl(documentId: string, page: number): string {
@@ -292,6 +332,15 @@ export async function mockRequest<T>(
     }
     return structuredClone(task) as T;
   }
-  if (path.startsWith("/v2/jobs/")) return job() as T;
+  if (path.startsWith("/v2/jobs?")) {
+    const requestedWorkspace = new URLSearchParams(path.split("?", 2)[1]).get("workspace_id");
+    return serviceJobs.filter((item) => !requestedWorkspace || item.repository_id === requestedWorkspace) as T;
+  }
+  if (path.startsWith("/v2/jobs/")) {
+    const jobId = path.slice("/v2/jobs/".length);
+    const existing = serviceJobs.find((item) => item.job_id === jobId);
+    if (existing) return existing as T;
+    throw new Error("后台任务不存在");
+  }
   throw new Error(`Mock endpoint is not implemented: ${method} ${path}`);
 }

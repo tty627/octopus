@@ -1,5 +1,9 @@
 # 本地诊断与迁移恢复
 
+> 本文仅适用于 V1 Raw/Index 回滚 CLI。V2 桌面资料空间请先查看
+> [V2 故障排查](TROUBLESHOOTING.md)；不要对 `%LOCALAPPDATA%\Octopus\workspaces`
+> 套用本文的 Index、Leaf、FolderNode 或 migration run 操作。
+
 ## 保存诊断包
 
 桌面端“状态中心”选择“保存本地诊断包…”，或运行：

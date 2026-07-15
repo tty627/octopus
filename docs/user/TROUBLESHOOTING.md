@@ -1,40 +1,102 @@
-# Windows 首次运行故障排查
+# Octopus V2 故障排查
 
-向导先显示可执行的恢复动作；“显示技术详情”会展开稳定错误码和异常文本。报告错误时可
-提供错误码，但不要提交文件路径、文件名、查询、内容或 API Key。
+## 应用无法启动
 
-| 错误码 | 含义 | 恢复动作 |
-| --- | --- | --- |
-| `raw_missing` | 资料目录不存在 | 重新选择现有目录 |
-| `raw_unreadable` | 无法读取部分或全部资料 | 关闭占用程序并检查当前用户读取权限 |
-| `index_nested` | Raw/Index 相同或互相嵌套 | 选择同级、独立的 Index 目录 |
-| `index_not_empty` | 新 Index 路径已有内容 | 选择新的空目录；不要手动清空不认识的目录 |
-| `index_permission` | Index 位置不可写 | 改用“文档”或当前用户可写磁盘 |
-| `disk_space` | 可用空间低于预检要求 | 释放空间或选择其他磁盘后重新预检 |
-| `repository_locked` | 另一个更新任务正在运行 | 等待任务结束；仅在确认进程已退出后重试 |
-| `parser_failure` | 单文件解析/OCR 失败 | 保留基础索引，关闭损坏/加密文件后用 CLI 重试 |
-| `network_ai` | AI 网络或凭据不可用 | 首次向导不使用 AI；高级仓库可关闭 AI 后重试 |
-| `unknown` | 未分类错误 | 展开技术详情并附本地 RunReport 报告问题 |
+1. 确认 Windows 11 x64 已安装 WebView2 Runtime。
+2. 结束仍在运行的旧版 Octopus 后重试。
+3. 如果刚升级，重新启动应用，桌面端会检查并重启版本不匹配的本地 API。
+4. 查看 `%APPDATA%\Octopus\api.log` 的最后一段错误。
 
-## 安全取消
+原始资料和任务不会因为桌面窗口启动失败而被删除。
 
-点击取消后按钮会立即禁用。扫描、Leaf 和 FolderNode 阶段会在安全检查点终止；单个 OCR
-调用不会被强杀。提交阶段开始后不能取消，以免产生半提交状态。取消报告位于 Index 的
-`.octopus/runs/`，状态为 `cancelled`，Raw 文件哈希不应变化。
+## 安装包打不开
 
-## 更新检查不可用
+开发预览版未签名，Windows 可能显示 SmartScreen。先使用 `SHA256SUMS.txt` 校验安装包，不要使用来源不明的副本。
 
-离线、GitHub 限流、超时或异常响应只会显示“暂时无法检查更新”。它不会阻止向导、索引
-或搜索。需要立即重查时可运行 `octopus upgrade check --format json`。
+```powershell
+Get-FileHash .\Octopus-2.0.0.dev1-win-x64-setup.exe -Algorithm SHA256
+```
+
+Hash 一致后，按 [Windows 安装说明](WINDOWS_INSTALLATION.md) 操作。正式签名版本不应要求绕过无效签名或损坏文件警告。
+
+## 无法添加资料文件夹
+
+常见原因：
+
+- 文件夹不存在或当前用户不可读；
+- 选择了已经导入的同一范围；
+- 新文件夹与已有资料空间互为父子目录；
+- 网络盘或同步盘暂时离线。
+
+选择一个实际包含资料、且不与已有资料空间重叠的目录。Octopus 不需要单独选择 Index 目录。
+
+## 同步看起来停住
+
+长 PDF 可能正在逐页渲染或 OCR。资料页应显示当前文件、阶段、页码和总页数。不要仅因为同一文件停留数分钟就强制结束进程。
+
+如果进度长时间完全不变化：
+
+1. 查看文件是否加密、损坏或被其他程序独占；
+2. 等待当前任务失败或完成；
+3. 使用单文件“重新处理”；
+4. 查看 `%APPDATA%\Octopus\api.log`。
+
+## PDF 页面预览不可用
+
+先确认：
+
+- 文档状态不是“处理失败”；
+- 搜索结果有可靠页码；
+- 页面缓存目录中存在 PNG；
+- 本地 API 仍在运行。
+
+页面缓存位于：
+
+```text
+%LOCALAPPDATA%\Octopus\workspaces\<workspace_id>\previews
+```
+
+缓存可删除后重新处理文档，但不要删除 `%APPDATA%\Octopus\workspaces\<workspace_id>\tasks`。
+
+## 搜索只有文件名，没有正文
+
+Office 和图片在当前开发里程碑中可能显示“仅文件信息”。这不是失败，表示文件名和元数据可搜索，但正文解析尚未接入。
+
+PDF 或文本显示“识别质量低”时，低质量正文不会参与排名，以避免乱码污染结果。可以按文件名查找或重新处理。
+
+## 任务没有立即保存
+
+任务页会显示“保存中”“已保存”“本地草稿”或“保存冲突”。关闭应用前应看到“已保存”，但本地草稿会在编辑时同步保留。
+
+发生冲突时选择恢复本地草稿或保留服务端版本。不要重复快速点击“加入任务”或归档按钮来试图绕过冲突。
+
+## AI 设置无法保存
+
+- 启用辅助整理时必须有有效 API Key；
+- Base URL 必须是受支持的 HTTPS 地址；
+- 模型名称不能为空；
+- 测试连接失败不影响本地搜索；
+- 页面图像授权与文本 AI 设置分开保存并显示权威状态。
+
+不要在 issue、截图或诊断中提交 API Key。
 
 ## 技术诊断
+
+桌面 V2 的主要本地状态：
+
+```text
+%APPDATA%\Octopus\config.json
+%APPDATA%\Octopus\api.log
+%APPDATA%\Octopus\ui-state.json
+%LOCALAPPDATA%\Octopus\workspaces
+```
+
+旧 CLI 诊断命令仍用于 V1 回滚资料空间：
 
 ```powershell
 octopus doctor
 octopus validate --format json
-octopus report --last --format markdown
 octopus diagnostics create --repository MyRepository --output .\octopus-diagnostics.zip
 ```
 
-推荐优先使用脱敏诊断包；其字段范围、显式分享同意和迁移恢复步骤见
-[本地诊断与迁移恢复](DIAGNOSTICS_AND_RECOVERY.md)。Octopus 不会自动上传这些文件。
+Octopus 不会自动上传日志或诊断文件。分享前检查其中是否包含私人路径或文件名。

@@ -283,7 +283,8 @@ def create_app(
         if request.url.path.startswith("/ui"):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'"
+                "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
+                "base-uri 'none'"
             )
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Referrer-Policy"] = "no-referrer"

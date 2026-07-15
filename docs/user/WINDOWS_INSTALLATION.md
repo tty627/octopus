@@ -2,64 +2,90 @@
 
 ## 支持范围
 
-正式支持 Windows 11 Home/Pro x64。Windows 10 和 ARM64 不在 1.1 发布矩阵中。
-离线安装器已包含 Python、Office/PDF 解析器和 OCR/ONNX 模型；首次流程不需要 Node.js、
-API Key 或管理员权限。桌面界面使用系统 WebView2 Runtime；缺失时应用会显示安装指引。
+`2.0.0.dev1` 支持 Windows 11 x64。安装包包含 Python 运行时、PDF 解析器、本地 OCR 和桌面资源，不需要用户安装 Node.js 或配置 API Key。
 
-## 安装前验证
+桌面界面依赖 Microsoft WebView2 Runtime。多数 Windows 11 设备已经包含该组件；缺失时应用会显示启动错误。
 
-`2.0.0.dev0` 本轮生成的是 unsigned 开发安装包，不应被当作正式签名发布。使用随包生成的
-`SHA256SUMS.txt` 在 PowerShell 中验证完整性：
+## 下载
 
-```powershell
-Get-FileHash .\Octopus-2.0.0.dev0-win-x64-setup.exe -Algorithm SHA256
-```
+从 [GitHub Releases](https://github.com/tty627/octopus/releases) 获取：
 
-Hash 必须与校验文件一致。正式发布包还必须通过 Authenticode 与时间戳验证；开发包不会显示
-有效签名，因此仅用于本机开发验证。
+- `Octopus-2.0.0.dev1-win-x64-setup.exe`；
+- 或 `Octopus-2.0.0.dev1-win-x64-portable.zip`；
+- `SHA256SUMS.txt`。
 
-## 免安装运行
+不要从聊天附件、网盘转存或不明镜像运行安装包。
 
-下载 `Octopus-<版本>-win-x64-portable.zip` 后，解压到任意可写目录，直接双击
-`Octopus.exe`。免安装版与安装版使用相同的 `%APPDATA%\Octopus` 配置和资料空间，不需要
-Python、Node.js 或管理员权限；不要在压缩包内部直接运行。
+## 校验
 
-如果 GitHub 暂时没有 Release，可以在仓库页面点击 **Code → Download ZIP**，解压源码后
-双击根目录的 `start-octopus.cmd`。首次运行会自动准备本地 Python 环境，后续直接启动。
-
-## 安装与首次结果
-
-1. 以标准用户运行安装器。程序安装到 `%LOCALAPPDATA%\Programs\Octopus`。
-2. 从开始菜单打开 Octopus。
-3. 选择“使用示例资料”或自己的资料文件夹；索引目录必须与资料目录分离且不互相嵌套。
-4. 阅读文件数、格式、时间、磁盘和阻断项预检后开始。
-5. 首批结果可用后进入工作台；搜索结果会按用途分组，单击后先在证据检查器核验。
-6. 明确加入任务包后可编辑槽位、导出 Markdown，或只复制再次确认的来源副本。
-
-示例会复制到“文档”目录中的唯一文件夹；若名称已存在会改用新编号，绝不覆盖。向导创建
-的仓库默认关闭 AI。取消发生在提交前时，Octopus 回滚未提交索引并保留仓库注册，可一键
-重试；处理 OCR 文件时会先安全完成当前文件。
-
-## 命令行与更新检查
-
-安装目录包含 `octopus-cli.exe`，并提供用户命令入口 `octopus.cmd`。Windows 文件名不区分
-大小写，因此 GUI `Octopus.exe` 与 CLI 不能同时以仅大小写不同的名称存放在共享目录。
+开发预览版未签名，安装前应校验 SHA-256：
 
 ```powershell
-octopus version
-octopus upgrade check --format table
-octopus upgrade check --format json
+Get-FileHash .\Octopus-2.0.0.dev1-win-x64-setup.exe -Algorithm SHA256
 ```
 
-更新检查只访问 `api.github.com/repos/tty627/octopus/releases/latest`，3 秒超时并缓存 24
-小时。它只显示发布说明和浏览器入口，不会下载或安装；离线或限流不影响启动和索引。
+输出必须与 `SHA256SUMS.txt` 中对应文件一致。Hash 不一致时删除该文件并从 GitHub Release 重新下载。
 
-## 卸载与重装
+## 安装版
 
-卸载器会停止 Octopus 启动的 watcher/API 后台进程并删除程序文件，但保留：
+1. 双击 setup 文件。
+2. 选择当前用户安装，不需要管理员权限。
+3. 默认安装到 `%LOCALAPPDATA%\Programs\Octopus`。
+4. 安装完成后从开始菜单打开 Octopus。
+5. 填写资料空间名称并选择原始资料文件夹。
+6. 创建后进入“资料”页，等待后台同步显示文档状态。
 
-- `%APPDATA%\Octopus` 配置、升级缓存和本地验收记录；
-- 用户 Raw、Index 和示例资料；
-- 任何非 Octopus 用户内容。
+未签名开发版可能触发 SmartScreen。确认文件来自官方 Release 且 Hash 一致后再决定是否运行；不要绕过证书无效、Hash 不一致或文件损坏警告。
 
-重装后程序会读取原配置并识别已注册仓库。
+## 免安装版
+
+1. 解压 portable zip 到普通可写目录。
+2. 不要在压缩包内部直接运行。
+3. 双击 `Octopus.exe`。
+
+安装版和 portable 版使用相同的用户配置、缓存和任务目录。切换入口不会自动复制或删除资料。
+
+## 从源码启动
+
+GitHub Release 暂不可用时，可以下载仓库 ZIP，解压后双击：
+
+```text
+start-octopus.cmd
+```
+
+首次运行会准备本地 Python 环境。后续启动不会重复安装全部依赖。
+
+## 首次同步
+
+Octopus 只要求原始资料文件夹，不再要求 Index 路径。内部数据位置：
+
+```text
+%LOCALAPPDATA%\Octopus\workspaces   可重建缓存和页面预览
+%APPDATA%\Octopus\workspaces        用户任务
+```
+
+PDF 和文本会进行正文处理。Office 和图片在当前开发里程碑中至少按文件名和元数据进入搜索，并显示“仅文件信息”。
+
+## 升级、重装与卸载
+
+升级安装前可以直接退出旧版并运行新安装包。桌面端发现本地 API 版本不一致时会重启服务。
+
+卸载会删除程序文件，但保留：
+
+- 原始资料；
+- `%APPDATA%\Octopus` 中的配置和任务；
+- `%LOCALAPPDATA%\Octopus\workspaces` 中的可重建缓存；
+- V1 `*-Octopus-Index` 目录。
+
+重装后会重新读取这些资料空间。需要彻底清除用户数据时，应先备份任务，再由用户手工删除对应目录。
+
+## 安装仍失败
+
+查看 [故障排查](TROUBLESHOOTING.md)，并记录：
+
+- Windows 版本和架构；
+- setup 文件 SHA-256；
+- 安装器显示的具体错误；
+- `%APPDATA%\Octopus\api.log` 的相关时间段。
+
+不要公开上传 API Key、完整私人路径或原始资料。

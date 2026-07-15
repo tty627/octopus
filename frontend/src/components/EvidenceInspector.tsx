@@ -13,37 +13,51 @@ import {
 import { api } from "../api";
 import { openLocalUri } from "../bridge";
 import { useAppStore } from "../store";
-import type { SearchResultV2 } from "../types";
-import { formatBytes, readabilityLabel } from "../utils";
+import type { SearchResultV2, WorkspaceEvidence } from "../types";
+import { documentQualityLabel, formatBytes, searchEvidenceText } from "../utils";
 
 interface EvidenceInspectorProps {
-  onAdd: (result: SearchResultV2) => Promise<void>;
+  onAdd: (result: SearchResultV2, evidence: WorkspaceEvidence) => Promise<void>;
+  adding: boolean;
+  actionError: string;
 }
 
-export function EvidenceInspector({ onAdd }: EvidenceInspectorProps) {
+export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspectorProps) {
   const workspaceId = useAppStore((state) => state.workspaceId);
   const result = useAppStore((state) => state.inspector);
   const open = useAppStore((state) => state.inspectorOpen);
   const close = useAppStore((state) => state.closeInspector);
-  const query = useAppStore((state) => state.query);
+  const submittedQuery = useAppStore((state) => state.submittedQuery);
   const activeTask = useAppStore((state) => state.activeTask);
   const [page, setPage] = useState<number | null>(null);
+  const [selectedEvidenceIndex, setSelectedEvidenceIndex] = useState<number | null>(null);
   const [preview, setPreview] = useState("");
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [openError, setOpenError] = useState("");
   const evidence = useMemo(
     () => result ? [result.best_evidence, ...result.additional_evidence] : [],
     [result],
   );
-  const selectedEvidence = evidence.find((item) => item.page_number === page) ?? result?.best_evidence;
+  const selectedEvidence = selectedEvidenceIndex === null
+    ? null
+    : evidence[selectedEvidenceIndex] ?? null;
   const selected = Boolean(
-    result && activeTask?.items.some((item) =>
+    result && selectedEvidence && activeTask?.items.some((item) =>
       item.document_id === result.document_id &&
-      item.page_number === result.best_evidence.page_number
+      item.page_number === selectedEvidence.page_number &&
+      item.excerpt === selectedEvidence.excerpt
     ),
   );
+  const qualityState = result?.indexing_state === "failed"
+    ? "failed"
+    : result?.indexing_state === "metadata_only"
+      ? "metadata"
+      : result?.readability;
 
   useEffect(() => {
     setPage(result?.best_evidence.page_number ?? null);
+    setSelectedEvidenceIndex(result ? 0 : null);
+    setOpenError("");
   }, [result]);
 
   useEffect(() => {
@@ -55,7 +69,12 @@ export function EvidenceInspector({ onAdd }: EvidenceInspectorProps) {
       return () => undefined;
     }
     setPreviewState("loading");
-    void api.previewUrl(workspaceId, result.document_id, page).then((url) => {
+    void api.previewUrl(
+      workspaceId,
+      result.document_id,
+      page,
+      selectedEvidence ? submittedQuery : "",
+    ).then((url) => {
       nextUrl = url;
       if (!active) {
         if (url.startsWith("blob:")) URL.revokeObjectURL(url);
@@ -70,11 +89,29 @@ export function EvidenceInspector({ onAdd }: EvidenceInspectorProps) {
       active = false;
       if (nextUrl.startsWith("blob:")) URL.revokeObjectURL(nextUrl);
     };
-  }, [page, result, workspaceId]);
+  }, [page, result, selectedEvidence, submittedQuery, workspaceId]);
 
   const changePage = (delta: number) => {
     if (!result || page === null) return;
-    setPage(Math.min(result.page_count, Math.max(1, page + delta)));
+    const nextPage = Math.min(result.page_count, Math.max(1, page + delta));
+    setPage(nextPage);
+    const nextEvidenceIndex = evidence.findIndex((item) => item.page_number === nextPage);
+    setSelectedEvidenceIndex(nextEvidenceIndex >= 0 ? nextEvidenceIndex : null);
+  };
+
+  const chooseEvidence = (index: number) => {
+    setSelectedEvidenceIndex(index);
+    setPage(evidence[index]?.page_number ?? null);
+  };
+
+  const openSource = async () => {
+    if (!result) return;
+    setOpenError("");
+    try {
+      await openLocalUri(result.source_uri);
+    } catch {
+      setOpenError("原文件已不可访问，请同步后重新定位。");
+    }
   };
 
   return (
@@ -92,12 +129,18 @@ export function EvidenceInspector({ onAdd }: EvidenceInspectorProps) {
       ) : (
         <div className="inspectorScroll">
           <div className="documentFacts">
-            <span className={`qualityBadge quality-${result.readability}`}>{readabilityLabel(result.readability)}</span>
+            <span className={`qualityBadge quality-${qualityState}`}>
+              {documentQualityLabel(result.indexing_state, result.readability)}
+            </span>
             <span>{formatBytes(result.size_bytes)}</span>
             {result.page_count > 0 && <span>{result.page_count} 页</span>}
           </div>
 
-          {result.extension === ".pdf" && page !== null ? (
+          {result.indexing_state === "metadata_only" ? (
+            <div className="textEvidencePreview"><FileSearch size={22} /><span>当前仅提供文件名、路径和元数据检索。</span></div>
+          ) : result.indexing_state === "failed" ? (
+            <div className="unlocatedNotice"><AlertTriangle size={17} />当前文件处理失败，可按文件名查找。</div>
+          ) : result.extension === ".pdf" && page !== null ? (
             <section className="pageViewer" aria-label="PDF 页面预览">
               <div className="pageToolbar">
                 <button className="iconButton" disabled={page <= 1} onClick={() => changePage(-1)} aria-label="上一页" title="上一页"><ChevronLeft size={18} /></button>
@@ -118,19 +161,28 @@ export function EvidenceInspector({ onAdd }: EvidenceInspectorProps) {
 
           <section className="inspectorSection">
             <h3>命中内容</h3>
-            <p className="evidenceReason">
-              {selectedEvidence?.reason}
-              {selectedEvidence?.heading ? ` · ${selectedEvidence.heading}` : ""}
-            </p>
-            <p className={result.readability === "low" ? "evidenceExcerpt lowExcerpt" : "evidenceExcerpt"}>
-              {result.readability === "low"
-                ? "正文识别质量较低，可按文件名查找。"
-                : <HighlightedText text={selectedEvidence?.excerpt ?? ""} query={query} />}
-            </p>
+            {selectedEvidence ? (
+              <>
+                <p className="evidenceReason">
+                  {selectedEvidence.reason}
+                  {selectedEvidence.heading ? ` · ${selectedEvidence.heading}` : ""}
+                </p>
+                <p className={result.indexing_state === "indexed" && result.readability === "low" ? "evidenceExcerpt lowExcerpt" : "evidenceExcerpt"}>
+                  {result.indexing_state === "indexed" && result.readability !== "low"
+                    ? <HighlightedText text={selectedEvidence.excerpt} query={submittedQuery} />
+                    : searchEvidenceText(result.indexing_state, result.readability, selectedEvidence.excerpt)}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="evidenceReason">当前页没有搜索命中</p>
+                <p className="evidenceExcerpt">正在查看相邻原始页面，不会把其他页面的命中内容作为本页证据。</p>
+              </>
+            )}
             {evidence.length > 1 && (
               <div className="evidenceChoices">
                 {evidence.map((item, index) => (
-                  <button key={`${item.page_number}-${index}`} className={item.page_number === page ? "evidenceActive" : ""} onClick={() => setPage(item.page_number)}>
+                  <button key={`${item.page_number}-${index}`} className={selectedEvidenceIndex === index ? "evidenceActive" : ""} onClick={() => chooseEvidence(index)}>
                     {item.page_number ? `第 ${item.page_number} 页` : "文档信息"}
                   </button>
                 ))}
@@ -146,10 +198,14 @@ export function EvidenceInspector({ onAdd }: EvidenceInspectorProps) {
         </div>
       )}
 
+      {result && (actionError || openError) && <div className="inspectorActionError" role="alert"><AlertTriangle size={16} />{actionError || openError}</div>}
       {result && (
         <div className="inspectorActions">
-          <button className="secondaryButton" onClick={() => void openLocalUri(result.source_uri)}><ExternalLink size={17} />打开原文件</button>
-          <button className="primaryButton" disabled={selected} onClick={() => void onAdd(result)}>{selected ? <Check size={17} /> : <Plus size={17} />}{selected ? "已加入任务" : "加入任务"}</button>
+          <button className="secondaryButton" onClick={() => void openSource()}><ExternalLink size={17} />打开原文件</button>
+          <button className="primaryButton" disabled={selected || adding || !selectedEvidence} onClick={() => { if (selectedEvidence) void onAdd(result, selectedEvidence); }}>
+            {selected ? <Check size={17} /> : adding ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}
+            {selected ? "已加入任务" : adding ? "加入中" : selectedEvidence ? "加入任务" : "当前页无命中"}
+          </button>
         </div>
       )}
     </aside>

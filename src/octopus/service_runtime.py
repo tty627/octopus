@@ -15,6 +15,8 @@ from .engine import UpdateEngine
 from .models import JobStatus, ServiceJob, utc_now
 
 JobFunction = Callable[[], dict[str, Any]]
+JobProgressCallback = Callable[[dict[str, Any]], None]
+ProgressJobFunction = Callable[[JobProgressCallback], dict[str, Any]]
 JobKind = Literal["update", "rebuild_search", "validate", "package", "workspace_sync"]
 
 
@@ -46,6 +48,69 @@ class JobManager:
             self.futures[job.job_id] = self.executor.submit(self._execute, job.job_id, function)
             return job.model_copy(deep=True)
 
+    def submit_with_progress(
+        self,
+        repository_id: str,
+        kind: JobKind,
+        function: ProgressJobFunction,
+    ) -> ServiceJob:
+        """Submit a job that can publish progress without changing existing callers."""
+        with self.lock:
+            self._prune()
+            job = ServiceJob(
+                job_id=uuid.uuid4().hex,
+                repository_id=repository_id,
+                kind=kind,
+            )
+            self.jobs[job.job_id] = job
+            self.futures[job.job_id] = self.executor.submit(
+                self._execute_with_progress,
+                job.job_id,
+                function,
+            )
+            return job.model_copy(deep=True)
+
+    def submit_unique_with_progress(
+        self,
+        repository_id: str,
+        kind: JobKind,
+        function: ProgressJobFunction,
+    ) -> ServiceJob | None:
+        """Submit only when the same repository has no active job of this kind."""
+        with self.lock:
+            if self._active_locked(repository_id, kind):
+                return None
+            self._prune()
+            job = ServiceJob(
+                job_id=uuid.uuid4().hex,
+                repository_id=repository_id,
+                kind=kind,
+            )
+            self.jobs[job.job_id] = job
+            self.futures[job.job_id] = self.executor.submit(
+                self._execute_with_progress,
+                job.job_id,
+                function,
+            )
+            return job.model_copy(deep=True)
+
+    def _execute_with_progress(
+        self,
+        job_id: str,
+        function: ProgressJobFunction,
+    ) -> dict[str, Any]:
+        return self._execute(
+            job_id,
+            lambda: function(partial(self._record_progress, job_id)),
+        )
+
+    def _record_progress(self, job_id: str, progress: dict[str, Any]) -> None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None or job.status in {JobStatus.succeeded, JobStatus.failed}:
+                return
+            job.result = {**job.result, "progress": dict(progress)}
+
     def _execute(self, job_id: str, function: JobFunction) -> dict[str, Any]:
         with self.lock:
             job = self.jobs[job_id]
@@ -55,7 +120,10 @@ class JobManager:
             result = function()
             with self.lock:
                 job.status = JobStatus.succeeded
-                job.result = result
+                progress = job.result.get("progress")
+                job.result = dict(result)
+                if progress is not None and "progress" not in job.result:
+                    job.result["progress"] = progress
             return result
         except Exception as error:
             with self.lock:
@@ -82,11 +150,15 @@ class JobManager:
         return sorted(jobs, key=lambda item: item.created_at, reverse=True)
 
     def active(self, repository_id: str, kind: str | None = None) -> bool:
+        with self.lock:
+            return self._active_locked(repository_id, kind)
+
+    def _active_locked(self, repository_id: str, kind: str | None = None) -> bool:
         return any(
             job.repository_id == repository_id
             and (kind is None or job.kind == kind)
             and job.status in {JobStatus.queued, JobStatus.running}
-            for job in self.list(repository_id)
+            for job in self.jobs.values()
         )
 
     def _prune(self) -> None:

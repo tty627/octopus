@@ -1,4 +1,4 @@
-import type { Readability } from "./types";
+import type { IndexingState, Readability } from "./types";
 
 export function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -29,6 +29,26 @@ export function readabilityLabel(value: Readability): string {
   if (value === "readable") return "正文可读";
   if (value === "partial") return "部分可读";
   return "识别质量低";
+}
+
+export function documentQualityLabel(
+  indexingState: IndexingState,
+  readability: Readability,
+): string {
+  if (indexingState === "failed") return "处理失败";
+  if (indexingState === "metadata_only") return "仅文件信息";
+  return readabilityLabel(readability);
+}
+
+export function searchEvidenceText(
+  indexingState: IndexingState,
+  readability: Readability,
+  excerpt: string,
+): string {
+  if (indexingState === "failed") return "文件处理失败，可按文件名查找。";
+  if (indexingState === "metadata_only") return "当前仅提供文件名、路径和元数据检索。";
+  if (readability === "low") return "正文识别质量较低，可按文件名查找。";
+  return excerpt;
 }
 
 export function safeFileName(value: string): string {

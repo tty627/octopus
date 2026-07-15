@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 
 import pytest
 
@@ -37,6 +40,106 @@ def test_job_manager_tracks_success_failure_and_active_state() -> None:
     assert result and result.status == JobStatus.failed
     assert result.error_code == "ValueError"
     assert not manager.active("repo")
+    manager.shutdown()
+
+
+def test_job_manager_exposes_and_preserves_progress() -> None:
+    manager = JobManager(max_workers=1)
+    started = Event()
+    release = Event()
+
+    def execute(report: Callable[[dict[str, object]], None]) -> dict[str, object]:
+        report(
+            {
+                "phase": "processing",
+                "discovered": 3,
+                "processed": 1,
+                "current_page": 7,
+                "page_count": 40,
+                "pages_completed": 6,
+                "ocr_pages_completed": 2,
+                "extraction_stage": "ocr",
+            }
+        )
+        started.set()
+        assert release.wait(timeout=5)
+        report(
+            {
+                "phase": "completed",
+                "discovered": 3,
+                "processed": 3,
+                "current_page": 40,
+                "page_count": 40,
+                "pages_completed": 40,
+                "ocr_pages_completed": 8,
+                "extraction_stage": "page_complete",
+            }
+        )
+        return {"ok": True}
+
+    submitted = manager.submit_with_progress("workspace", "workspace_sync", execute)
+    assert started.wait(timeout=5)
+    running = manager.get(submitted.job_id)
+    assert running is not None
+    assert running.status == JobStatus.running
+    assert running.result["progress"] == {
+        "phase": "processing",
+        "discovered": 3,
+        "processed": 1,
+        "current_page": 7,
+        "page_count": 40,
+        "pages_completed": 6,
+        "ocr_pages_completed": 2,
+        "extraction_stage": "ocr",
+    }
+
+    release.set()
+    _wait(manager, submitted.job_id)
+    completed = manager.get(submitted.job_id)
+    assert completed is not None
+    assert completed.result == {
+        "ok": True,
+        "progress": {
+            "phase": "completed",
+            "discovered": 3,
+            "processed": 3,
+            "current_page": 40,
+            "page_count": 40,
+            "pages_completed": 40,
+            "ocr_pages_completed": 8,
+            "extraction_stage": "page_complete",
+        },
+    }
+    manager.shutdown()
+
+
+def test_job_manager_submits_only_one_unique_progress_job_under_concurrency() -> None:
+    manager = JobManager(max_workers=1)
+    callers = 8
+    barrier = Barrier(callers)
+    release = Event()
+
+    def execute(report: Callable[[dict[str, object]], None]) -> dict[str, object]:
+        report({"phase": "processing"})
+        assert release.wait(timeout=5)
+        return {"ok": True}
+
+    def submit() -> object:
+        barrier.wait(timeout=5)
+        return manager.submit_unique_with_progress(
+            "workspace",
+            "workspace_sync",
+            execute,
+        )
+
+    with ThreadPoolExecutor(max_workers=callers) as executor:
+        submitted = list(executor.map(lambda _: submit(), range(callers)))
+
+    accepted = [job for job in submitted if job is not None]
+    assert len(accepted) == 1
+    assert manager.active("workspace", "workspace_sync")
+    release.set()
+    _wait(manager, accepted[0].job_id)
     manager.shutdown()
 
 

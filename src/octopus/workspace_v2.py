@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -9,7 +10,9 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from contextlib import closing
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -20,6 +23,7 @@ from typing import Any, Literal, cast
 from pydantic import Field
 
 from .config import (
+    global_config_lock,
     load_global_config,
     load_repository_config,
     save_global_config,
@@ -64,6 +68,12 @@ IGNORED_DIRECTORY_NAMES = {
     "__pycache__",
 }
 
+ExtractionProgressCallback = Callable[[dict[str, Any]], None]
+_EXTRACTION_PROGRESS_CALLBACK: ContextVar[ExtractionProgressCallback | None] = ContextVar(
+    "octopus_extraction_progress_callback",
+    default=None,
+)
+
 
 class WorkspaceEvidence(OctopusModel):
     page_number: int | None = None
@@ -84,6 +94,7 @@ class WorkspaceSearchResult(OctopusModel):
     page_count: int = Field(ge=0)
     readability: Literal["readable", "partial", "low"]
     readability_score: float = Field(ge=0.0, le=1.0)
+    indexing_state: Literal["indexed", "metadata_only", "failed"]
     source_uri: str
     overview: str = ""
     best_evidence: WorkspaceEvidence
@@ -351,15 +362,33 @@ def _ocr_text(image: Any) -> str:
     return "\n".join(texts)
 
 
-def _extract_pdf(path: Path) -> ExtractedSource:
+def _extract_pdf(
+    path: Path,
+    progress_callback: ExtractionProgressCallback | None = None,
+) -> ExtractedSource:
     import pypdfium2 as pdfium  # type: ignore[import-untyped]
     from pypdf import PdfReader
 
     document = pdfium.PdfDocument(str(path))
     reader: PdfReader | None = None
     pages: list[ExtractedPage] = []
+    page_count = len(document)
+    ocr_pages_completed = 0
+
+    def report_progress(**changes: Any) -> None:
+        if progress_callback is not None:
+            progress_callback(dict(changes))
+
     try:
-        for page_index in range(len(document)):
+        for page_index in range(page_count):
+            page_number = page_index + 1
+            base_progress = {
+                "current_page": page_number,
+                "page_count": page_count,
+                "pages_completed": page_index,
+                "ocr_pages_completed": ocr_pages_completed,
+            }
+            report_progress(extraction_stage="pdfium", **base_progress)
             page = document[page_index]
             text_page = page.get_textpage()
             try:
@@ -370,6 +399,7 @@ def _extract_pdf(path: Path) -> ExtractedSource:
             method = "pdfium"
             score = readability_score(selected_text)
             if score < READABLE_THRESHOLD:
+                report_progress(extraction_stage="pypdf", **base_progress)
                 try:
                     reader = reader or PdfReader(str(path), strict=False)
                     pypdf_text = (
@@ -385,11 +415,13 @@ def _extract_pdf(path: Path) -> ExtractedSource:
                     score = pypdf_score
                     method = "pypdf"
             if score < READABLE_THRESHOLD:
+                report_progress(extraction_stage="ocr", **base_progress)
                 bitmap = page.render(scale=2.0)
                 try:
                     ocr_text = _ocr_text(bitmap.to_pil()).strip()
                 finally:
                     bitmap.close()
+                ocr_pages_completed += 1
                 ocr_score = readability_score(ocr_text)
                 if ocr_text and (ocr_score >= score + 0.05 or score < PARTIAL_THRESHOLD):
                     selected_text = ocr_text
@@ -397,11 +429,18 @@ def _extract_pdf(path: Path) -> ExtractedSource:
                     method = "ocr"
             pages.append(
                 ExtractedPage(
-                    page_number=page_index + 1,
+                    page_number=page_number,
                     text=selected_text,
                     extraction_method=method,
                     quality_score=score,
                 )
+            )
+            report_progress(
+                extraction_stage="page_complete",
+                current_page=page_number,
+                page_count=page_count,
+                pages_completed=page_number,
+                ocr_pages_completed=ocr_pages_completed,
             )
             page.close()
     finally:
@@ -449,7 +488,7 @@ def _extract_text(path: Path) -> ExtractedSource:
 def extract_source(path: Path) -> ExtractedSource:
     suffix = path.suffix.casefold()
     if suffix == ".pdf":
-        return _extract_pdf(path)
+        return _extract_pdf(path, _EXTRACTION_PROGRESS_CALLBACK.get())
     if suffix in TEXT_EXTENSIONS:
         return _extract_text(path)
     return ExtractedSource(title=path.stem, pages=[], page_count=0, status="metadata_only")
@@ -608,6 +647,11 @@ def assisted_rerank(
 
 
 def ensure_v2_workspaces() -> dict[str, GlobalWorkspace]:
+    with global_config_lock():
+        return _ensure_v2_workspaces_locked()
+
+
+def _ensure_v2_workspaces_locked() -> dict[str, GlobalWorkspace]:
     config = load_global_config()
     changed = False
     for repository_id, repository in config.repositories.items():
@@ -642,27 +686,34 @@ def create_workspace(raw_path: Path, name: str | None = None) -> GlobalWorkspace
     raw = raw_path.expanduser().resolve()
     if not raw.is_dir():
         raise ValueError(f"资料文件夹不存在或不可访问: {raw}")
-    config = load_global_config()
-    ensure_v2_workspaces()
-    config = load_global_config()
-    for workspace in config.workspaces.values():
-        if Path(workspace.raw_path).resolve() == raw:
-            config.active_workspace_id = workspace.workspace_id
-            save_global_config(config)
-            return workspace
-    workspace_id = str(uuid.uuid4())
-    workspace = GlobalWorkspace(
-        workspace_id=workspace_id,
-        name=(name or raw.name or "资料空间").strip(),
-        raw_path=str(raw),
-        storage_path=str(workspace_storage_path(workspace_id)),
-        ai_policy=AIConfig(enabled=False),
-    )
-    config.schema_version = WORKSPACE_SCHEMA_VERSION
-    config.workspaces[workspace_id] = workspace
-    config.active_workspace_id = workspace_id
-    save_global_config(config)
-    return workspace
+    with global_config_lock():
+        _ensure_v2_workspaces_locked()
+        config = load_global_config()
+        for workspace in config.workspaces.values():
+            existing_raw = Path(workspace.raw_path).expanduser().resolve()
+            if existing_raw == raw:
+                config.active_workspace_id = workspace.workspace_id
+                save_global_config(config)
+                return workspace
+            if raw in existing_raw.parents or existing_raw in raw.parents:
+                raise ValueError(
+                    "Selected folder overlaps existing workspace "
+                    f'"{workspace.name}" ({existing_raw}). Choose a non-overlapping folder '
+                    "or use the existing workspace."
+                )
+        workspace_id = str(uuid.uuid4())
+        workspace = GlobalWorkspace(
+            workspace_id=workspace_id,
+            name=(name or raw.name or "资料空间").strip(),
+            raw_path=str(raw),
+            storage_path=str(workspace_storage_path(workspace_id)),
+            ai_policy=AIConfig(enabled=False),
+        )
+        config.schema_version = WORKSPACE_SCHEMA_VERSION
+        config.workspaces[workspace_id] = workspace
+        config.active_workspace_id = workspace_id
+        save_global_config(config)
+        return workspace
 
 
 def get_workspace(workspace_id: str) -> GlobalWorkspace:
@@ -760,15 +811,49 @@ class WorkspaceStore:
             raise ValueError("Source path escapes the workspace")
         return path
 
-    def sync(self) -> dict[str, Any]:
+    def sync(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        force_document_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         if not self.raw.is_dir():
             raise FileNotFoundError(f"资料文件夹不可访问: {self.raw}")
+        progress_state: dict[str, Any] = {
+            "phase": "discovering",
+            "discovered": 0,
+            "processed": 0,
+            "current_file": "",
+            "indexed": 0,
+            "unchanged": 0,
+            "failed": 0,
+            "removed": 0,
+        }
+
+        def report_progress(**changes: Any) -> None:
+            if changes.pop("clear_page_progress", False):
+                for key in (
+                    "current_page",
+                    "page_count",
+                    "pages_completed",
+                    "ocr_pages_completed",
+                    "extraction_stage",
+                ):
+                    progress_state.pop(key, None)
+            progress_state.update(changes)
+            if progress_callback is not None:
+                progress_callback(dict(progress_state))
+
+        report_progress()
         files = _iter_source_files(self.raw)
+        report_progress(phase="processing", discovered=len(files))
         discovered_paths = {path.relative_to(self.raw).as_posix() for path in files}
         seen: set[str] = set()
         indexed = 0
         unchanged = 0
         failed = 0
+        processed = 0
+        forced = force_document_ids or set()
         with closing(self._connect()) as connection:
             existing = {
                 str(row["relative_path"]): row
@@ -780,15 +865,25 @@ class WorkspaceStore:
                     movable_by_hash.setdefault(str(row["content_hash"]), []).append(row)
             for path in files:
                 relative = path.relative_to(self.raw).as_posix()
+                report_progress(clear_page_progress=True, current_file=relative)
                 seen.add(relative)
                 stat = path.stat()
                 current = existing.get(relative)
                 if (
                     current is not None
+                    and str(current["document_id"]) not in forced
+                    and str(current["indexing_state"]) != "failed"
                     and int(current["size_bytes"]) == stat.st_size
                     and int(current["mtime_ns"]) == stat.st_mtime_ns
                 ):
                     unchanged += 1
+                    processed += 1
+                    report_progress(
+                        processed=processed,
+                        indexed=indexed,
+                        unchanged=unchanged,
+                        failed=failed,
+                    )
                     continue
                 content_hash = sha256_file(path)
                 document_id = str(current["document_id"]) if current else ""
@@ -797,7 +892,13 @@ class WorkspaceStore:
                     moved = moved_candidates.pop(0) if moved_candidates else None
                     document_id = str(moved["document_id"]) if moved else str(uuid.uuid4())
                 try:
-                    extracted = extract_source(path)
+                    progress_token = _EXTRACTION_PROGRESS_CALLBACK.set(
+                        lambda update: report_progress(**update)
+                    )
+                    try:
+                        extracted = extract_source(path)
+                    finally:
+                        _EXTRACTION_PROGRESS_CALLBACK.reset(progress_token)
                     connection.execute("SAVEPOINT replace_document")
                     self._replace_document(
                         connection,
@@ -830,7 +931,15 @@ class WorkspaceStore:
                         error=error,
                     )
                     failed += 1
+                processed += 1
+                report_progress(
+                    processed=processed,
+                    indexed=indexed,
+                    unchanged=unchanged,
+                    failed=failed,
+                )
             removed = sorted(set(existing) - seen)
+            report_progress(phase="finalizing", current_file="", removed=len(removed))
             for relative in removed:
                 document_id = str(existing[relative]["document_id"])
                 current_path = connection.execute(
@@ -851,7 +960,7 @@ class WorkspaceStore:
                 (WORKSPACE_SCHEMA_VERSION,),
             )
             connection.commit()
-        return {
+        result = {
             "workspace_id": self.workspace.workspace_id,
             "discovered": len(files),
             "indexed": indexed,
@@ -860,6 +969,8 @@ class WorkspaceStore:
             "failed": failed,
             "health": self.health().model_dump(mode="json"),
         }
+        report_progress(phase="completed", current_file="")
+        return result
 
     def _delete_document(self, connection: sqlite3.Connection, document_id: str) -> None:
         rows = connection.execute(
@@ -1013,10 +1124,14 @@ class WorkspaceStore:
         if not self.database.exists():
             return WorkspaceHealth()
         with closing(self._connect()) as connection:
+            document_count = int(
+                connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            )
             counts = {
                 str(row["readability"]): int(row["count"])
                 for row in connection.execute(
-                    "SELECT readability, COUNT(*) AS count FROM documents GROUP BY readability"
+                    "SELECT readability, COUNT(*) AS count FROM documents "
+                    "WHERE indexing_state = 'indexed' GROUP BY readability"
                 ).fetchall()
             }
             metadata_only = int(
@@ -1033,7 +1148,7 @@ class WorkspaceStore:
                 "SELECT value FROM workspace_metadata WHERE key = 'last_sync_at'"
             ).fetchone()
             return WorkspaceHealth(
-                document_count=sum(counts.values()),
+                document_count=document_count,
                 readable_count=counts.get("readable", 0),
                 partial_count=counts.get("partial", 0),
                 low_quality_count=counts.get("low", 0),
@@ -1108,6 +1223,8 @@ class WorkspaceStore:
         if not value:
             raise ValueError("Search query cannot be empty")
         normalized_query = normalize_search_text(value)
+        if not normalized_query:
+            raise ValueError("Search query must contain searchable text")
         with closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM documents").fetchall()
             documents = {str(row["document_id"]): row for row in rows}
@@ -1131,14 +1248,21 @@ class WorkspaceStore:
                     metadata_score = 0.0
                 elif normalized_query in filename:
                     tier, reason = 1, "文件名包含查询内容"
-                    metadata_score = max(0.0, (len(stem) - len(normalized_query)) / 100.0)
+                    target = stem if normalized_query in stem else filename
+                    position = target.find(normalized_query)
+                    length_penalty = max(0, len(target) - len(normalized_query)) / 10_000.0
+                    metadata_score = (
+                        length_penalty
+                        if position == 0
+                        else 1.0 + (position / 1_000.0) + length_penalty
+                    )
                 elif normalized_query and SequenceMatcher(
                     None, normalized_query, stem
                 ).ratio() >= 0.72:
                     tier, reason = 1, "文件名与查询内容相近"
-                    metadata_score = 1.0 - SequenceMatcher(
-                        None, normalized_query, stem
-                    ).ratio()
+                    metadata_score = 2.0 + (
+                        1.0 - SequenceMatcher(None, normalized_query, stem).ratio()
+                    )
                 elif normalized_query in title:
                     tier, reason = 2, "文档标题包含查询内容"
                     metadata_score = 0.0
@@ -1194,9 +1318,17 @@ class WorkspaceStore:
                         continue
                     heading = str(match["heading"])
                     body = str(match["body"])
-                    heading_match = normalized_query and normalized_query in normalize_search_text(
-                        heading
+                    query_parts = normalized_query.split()
+                    normalized_heading = normalize_search_text(heading)
+                    normalized_body = normalize_search_text(body)
+                    heading_match = bool(query_parts) and all(
+                        part in normalized_heading for part in query_parts
                     )
+                    body_match = bool(query_parts) and all(
+                        part in normalized_body for part in query_parts
+                    )
+                    if not heading_match and not body_match:
+                        continue
                     tier = 2 if heading_match else 3
                     reason = "章节标题包含查询内容" if heading_match else "正文包含查询内容"
                     evidence = WorkspaceEvidence(
@@ -1276,6 +1408,7 @@ class WorkspaceStore:
                         page_count=int(row["page_count"]),
                         readability=_readability_value(row["readability"]),
                         readability_score=float(row["readability_score"]),
+                        indexing_state=_indexing_state_value(row["indexing_state"]),
                         source_uri=source.as_uri(),
                         overview=str(row["overview"]),
                         best_evidence=best,
@@ -1314,9 +1447,17 @@ class WorkspaceStore:
             duration_ms=duration_ms,
         )
 
-    def preview_path(self, document_id: str, page_number: int) -> Path:
+    def preview_path(
+        self,
+        document_id: str,
+        page_number: int,
+        highlight: str = "",
+    ) -> Path:
         if page_number < 1:
             raise ValueError("Page number must be positive")
+        highlight = " ".join(highlight.split()).strip()
+        if len(highlight) > 200:
+            raise ValueError("Preview highlight is too long")
         with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT relative_path, content_hash, extension, page_count FROM documents "
@@ -1329,7 +1470,13 @@ class WorkspaceStore:
             raise ValueError("Page preview is available only for PDF documents")
         if page_number > int(row["page_count"]):
             raise FileNotFoundError("Page not found")
-        destination = self.previews / str(row["content_hash"]) / f"{page_number}.png"
+        suffix = ""
+        if highlight:
+            digest = hashlib.sha256(
+                normalize_search_text(highlight).encode("utf-8")
+            ).hexdigest()[:16]
+            suffix = f"-{digest}"
+        destination = self.previews / str(row["content_hash"]) / f"{page_number}{suffix}.png"
         if destination.exists():
             return destination
         import pypdfium2 as pdfium
@@ -1341,6 +1488,73 @@ class WorkspaceStore:
             bitmap = page.render(scale=1.8)
             try:
                 image = bitmap.to_pil()
+                if highlight:
+                    from PIL import Image, ImageDraw
+
+                    text_page = page.get_textpage()
+                    boxes: list[tuple[float, float, float, float]] = []
+                    try:
+                        searcher = text_page.search(highlight, match_case=False)
+                        try:
+                            while len(boxes) < 200:
+                                match = searcher.get_next()
+                                if match is None:
+                                    break
+                                start, count = match
+                                for index in range(start, start + count):
+                                    try:
+                                        left, bottom, right, top = text_page.get_charbox(index)
+                                    except (IndexError, RuntimeError):
+                                        continue
+                                    if right > left and top > bottom:
+                                        boxes.append((left, bottom, right, top))
+                                    if len(boxes) >= 200:
+                                        break
+                        finally:
+                            searcher.close()
+                    finally:
+                        text_page.close()
+                    if boxes:
+                        merged_boxes: list[tuple[float, float, float, float]] = []
+                        for left, bottom, right, top in boxes:
+                            if not merged_boxes:
+                                merged_boxes.append((left, bottom, right, top))
+                                continue
+                            current_left, current_bottom, current_right, current_top = (
+                                merged_boxes[-1]
+                            )
+                            overlap = min(top, current_top) - max(bottom, current_bottom)
+                            minimum_height = min(top - bottom, current_top - current_bottom)
+                            same_line = overlap >= minimum_height * 0.45
+                            close_horizontal = left - current_right <= max(6.0, minimum_height)
+                            if same_line and close_horizontal:
+                                merged_boxes[-1] = (
+                                    min(current_left, left),
+                                    min(current_bottom, bottom),
+                                    max(current_right, right),
+                                    max(current_top, top),
+                                )
+                            else:
+                                merged_boxes.append((left, bottom, right, top))
+                        page_width, page_height = page.get_size()
+                        scale_x = image.width / page_width
+                        scale_y = image.height / page_height
+                        base = image.convert("RGBA")
+                        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+                        draw = ImageDraw.Draw(overlay)
+                        for left, bottom, right, top in merged_boxes:
+                            draw.rectangle(
+                                (
+                                    round(left * scale_x),
+                                    round((page_height - top) * scale_y),
+                                    round(right * scale_x),
+                                    round((page_height - bottom) * scale_y),
+                                ),
+                                fill=(255, 211, 61, 105),
+                                outline=(214, 151, 0, 190),
+                                width=1,
+                            )
+                        image = Image.alpha_composite(base, overlay).convert("RGB")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 image.save(destination, format="PNG", optimize=True)
             finally:
@@ -1350,7 +1564,11 @@ class WorkspaceStore:
             document.close()
         return destination
 
-    def reprocess_document(self, document_id: str) -> dict[str, Any]:
+    def reprocess_document(
+        self,
+        document_id: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT relative_path FROM documents WHERE document_id = ?", (document_id,)
@@ -1358,11 +1576,7 @@ class WorkspaceStore:
             if row is None:
                 raise FileNotFoundError("Document not found")
             relative_path = str(row["relative_path"])
-            connection.execute(
-                "UPDATE documents SET modified_at = '' WHERE document_id = ?", (document_id,)
-            )
-            connection.commit()
-        result = self.sync()
+        result = self.sync(progress_callback, force_document_ids={document_id})
         result["reprocessed_document_id"] = document_id
         result["relative_path"] = relative_path
         return result

@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from octopus.api import create_app
-from octopus.workspace_v2 import ExtractedPage, ExtractedSource
+from octopus.config import (
+    global_config_lock,
+    load_global_config,
+    save_global_config,
+    workspace_storage_path,
+)
+from octopus.models import GlobalWorkspace
+from octopus.workspace_v2 import ExtractedPage, ExtractedSource, create_workspace
 
 TOKEN = "test-token-that-is-long-enough-for-v2-api"
 
@@ -30,6 +39,52 @@ def _wait_for_v2_job(
     raise AssertionError("V2 API job did not finish")
 
 
+def test_workspace_settings_share_the_global_config_transaction_lock(tmp_path: Path) -> None:
+    raw = tmp_path / "primary"
+    sibling = tmp_path / "sibling"
+    raw.mkdir()
+    sibling.mkdir()
+    workspace = create_workspace(raw, "Primary")
+    sibling_id = str(uuid.uuid4())
+    holding_lock = Event()
+    release_lock = Event()
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    app = create_app(token=TOKEN, start_scheduler=False)
+
+    def add_sibling_from_stale_snapshot() -> None:
+        with global_config_lock():
+            config = load_global_config()
+            holding_lock.set()
+            assert release_lock.wait(timeout=5)
+            config.workspaces[sibling_id] = GlobalWorkspace(
+                workspace_id=sibling_id,
+                name="Sibling",
+                raw_path=str(sibling),
+                storage_path=str(workspace_storage_path(sibling_id)),
+            )
+            save_global_config(config)
+
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as executor:
+        writer = executor.submit(add_sibling_from_stale_snapshot)
+        assert holding_lock.wait(timeout=5)
+        setting = executor.submit(
+            client.put,
+            f"/v2/workspaces/{workspace.workspace_id}/vision-authorization",
+            headers=headers,
+            json={"vision_enabled": True},
+        )
+        time.sleep(0.05)
+        assert not setting.done()
+        release_lock.set()
+        writer.result(timeout=5)
+        response = setting.result(timeout=5)
+
+    assert response.status_code == 200
+    config = load_global_config()
+    assert sibling_id in config.workspaces
+    assert config.workspaces[workspace.workspace_id].vision_enabled is True
+
+
 def test_v2_workspace_search_preview_tasks_and_read_only_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -44,8 +99,10 @@ def test_v2_workspace_search_preview_tasks_and_read_only_source(
     Image.new("RGB", (180, 240), "white").save(pdf, "PDF")
     before = {path.name: path.read_bytes() for path in raw.iterdir()}
     original_extract = workspace_v2.extract_source
+    extracted_paths: list[Path] = []
 
     def extract(path: Path) -> ExtractedSource:
+        extracted_paths.append(path)
         if path.suffix.casefold() != ".pdf":
             return original_extract(path)
         return ExtractedSource(
@@ -82,6 +139,26 @@ def test_v2_workspace_search_preview_tasks_and_read_only_source(
         workspace_id = workspace["workspace_id"]
         job = _wait_for_v2_job(client, headers, created.json()["job"]["job_id"])
         assert job["status"] == "succeeded", job
+        assert job["result"]["progress"]["phase"] == "completed"
+        assert job["result"]["progress"]["processed"] == 2
+        listed_jobs = client.get(
+            "/v2/jobs",
+            headers=headers,
+            params={"workspace_id": workspace_id},
+        )
+        assert listed_jobs.status_code == 200
+        assert [item["job_id"] for item in listed_jobs.json()] == [job["job_id"]]
+
+        nested = raw / "nested"
+        nested.mkdir()
+        overlap = client.post(
+            "/v2/workspaces",
+            headers=headers,
+            json={"raw_path": str(nested), "name": "Nested"},
+        )
+        assert overlap.status_code == 422
+        assert "overlaps existing workspace" in overlap.json()["detail"]
+        nested.rmdir()
 
         search = client.post(
             f"/v2/workspaces/{workspace_id}/search",
@@ -101,6 +178,25 @@ def test_v2_workspace_search_preview_tasks_and_read_only_source(
         ).json()["results"][0]
         assert series["name"] == "09 级数.pdf"
         assert "锟" not in series["best_evidence"]["excerpt"]
+        pdf_extractions = extracted_paths.count(pdf)
+        reprocessed = client.post(
+            f"/v2/workspaces/{workspace_id}/documents/{series['document_id']}/reprocess",
+            headers=headers,
+        )
+        assert reprocessed.status_code == 202
+        reprocess_job = _wait_for_v2_job(client, headers, reprocessed.json()["job_id"])
+        assert reprocess_job["status"] == "succeeded", reprocess_job
+        assert extracted_paths.count(pdf) == pdf_extractions + 1
+        assert reprocess_job["result"]["progress"] == {
+            "phase": "completed",
+            "discovered": 2,
+            "processed": 2,
+            "current_file": "",
+            "indexed": 1,
+            "unchanged": 1,
+            "failed": 0,
+            "removed": 0,
+        }
         preview_url = (
             f"/v2/workspaces/{workspace_id}/documents/{series['document_id']}"
             f"/pages/1/preview"
@@ -110,6 +206,16 @@ def test_v2_workspace_search_preview_tasks_and_read_only_source(
         assert preview.status_code == 200
         assert preview.headers["content-type"] == "image/png"
         assert preview.content.startswith(b"\x89PNG")
+        highlighted_preview = client.get(
+            f"{preview_url}?highlight=series",
+            headers=headers,
+        )
+        assert highlighted_preview.status_code == 200
+        assert highlighted_preview.content.startswith(b"\x89PNG")
+        assert client.get(
+            f"{preview_url}?highlight={'x' * 201}",
+            headers=headers,
+        ).status_code == 422
 
         created_task = client.post(
             f"/v2/workspaces/{workspace_id}/tasks",

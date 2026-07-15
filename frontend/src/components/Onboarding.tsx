@@ -1,27 +1,24 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Check, FolderOpen, LoaderCircle } from "lucide-react";
-import { ApiError, api, waitForJob } from "../api";
+import { ApiError, api } from "../api";
 import { chooseDirectory } from "../bridge";
-import type { Workspace } from "../types";
+import type { ServiceJob, Workspace } from "../types";
 
 export function Onboarding({
   onCreated,
   compact = false,
 }: {
-  onCreated: (workspace: Workspace) => void;
+  onCreated: (workspace: Workspace, job: ServiceJob) => void;
   compact?: boolean;
 }) {
   const [rawPath, setRawPath] = useState("");
   const [name, setName] = useState("我的资料");
   const [error, setError] = useState("");
   const create = useMutation({
-    mutationFn: async () => {
-      const value = await api.createWorkspace(rawPath, name);
-      await waitForJob(value.job.job_id);
-      return await api.workspace(value.workspace.workspace_id);
-    },
-    onSuccess: onCreated,
+    mutationFn: () => api.createWorkspace(rawPath, name),
+    onMutate: () => setError(""),
+    onSuccess: ({ workspace, job }) => onCreated(workspace, job),
     onError: (reason) => setError(reason instanceof ApiError ? reason.message : "资料空间创建失败。"),
   });
 
@@ -50,7 +47,7 @@ export function Onboarding({
       <div className="formActions">
         <button className="primaryButton" disabled={!rawPath || !name.trim() || create.isPending} onClick={() => create.mutate()}>
           {create.isPending ? <LoaderCircle className="spin" size={17} /> : <FolderOpen size={17} />}
-          {create.isPending ? "正在建立" : "建立资料空间"}
+          {create.isPending ? "正在创建" : "建立资料空间"}
         </button>
       </div>
       {error && <div className="errorBox" role="alert">{error}</div>}

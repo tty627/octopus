@@ -22,6 +22,7 @@ from .activation import export_activation_records, summarize_activation_exports
 from .compatibility import compatibility_report
 from .config import (
     create_repository,
+    global_config_lock,
     load_global_config,
     load_repository_config,
     load_repository_state,
@@ -383,9 +384,10 @@ def repository_use(repository: str) -> None:
     """Select the active repository by ID, name, or Index path."""
     index = _repository(repository)
     local = load_repository_config(index)
-    global_config = load_global_config()
-    global_config.active_repository_id = local.repository.raw_repo_id
-    save_global_config(global_config)
+    with global_config_lock():
+        global_config = load_global_config()
+        global_config.active_repository_id = local.repository.raw_repo_id
+        save_global_config(global_config)
     console.print(f"[green]Active repository:[/green] {local.repository.repository_name}")
 
 

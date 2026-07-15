@@ -91,7 +91,14 @@ class DesktopBridge:
     def save_ui_state(self, state: dict[str, Any]) -> dict[str, bool]:
         allowed = {
             key: state[key]
-            for key in ("page", "repository_id", "window", "task_pack_id")
+            for key in (
+                "page",
+                "workspace_id",
+                "task_id",
+                "repository_id",
+                "task_pack_id",
+                "window",
+            )
             if key in state
         }
         atomic_write_json(ui_state_path(), allowed)

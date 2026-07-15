@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 
 test("search, page preview, task collection and export form a V2 loop", async ({ page }) => {
@@ -16,13 +17,26 @@ test("search, page preview, task collection and export form a V2 loop", async ({
   await expect(inspector).toContainText("常微分方程的基本概念");
   await inspector.getByRole("button", { name: "加入任务", exact: true }).click();
   await expect(page.locator(".taskTray")).toContainText("1 条证据");
+  await page.getByRole("button", { name: "将 常微分方程复习提纲.txt 加入任务" }).click();
+  await expect(page.locator(".taskTray")).toContainText("2 条证据");
 
   await page.getByRole("button", { name: "任务", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "任务名称" })).toHaveValue("微分方程");
   await expect(page.getByText("微分方程coursenotes.pdf", { exact: true })).toBeVisible();
+  await expect(page.getByText("常微分方程复习提纲.txt", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "任务名称" }).fill("微分方程核对结果");
+  await page.getByRole("textbox", { name: "任务目标" }).fill("包含刚刚加入的两条证据");
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "导出", exact: true }).click();
-  expect((await download).suggestedFilename()).toBe("微分方程.md");
+  const exported = await download;
+  expect(exported.suggestedFilename()).toBe("微分方程核对结果.md");
+  const exportedPath = await exported.path();
+  expect(exportedPath).not.toBeNull();
+  const markdown = await readFile(exportedPath, "utf8");
+  expect(markdown).toContain("# 微分方程核对结果");
+  expect(markdown).toContain("包含刚刚加入的两条证据");
+  expect(markdown).toContain("微分方程coursenotes.pdf");
+  expect(markdown).toContain("常微分方程复习提纲.txt");
 });
 
 test("search results contain human evidence and no internal V1 fields", async ({ page }) => {
@@ -42,7 +56,7 @@ test("documents health, reprocess and explicit vision authorization are usable",
   await expect(page.getByRole("heading", { name: "资料" })).toBeVisible();
   await expect(page.getByText("正文可读").first()).toBeVisible();
   await page.getByRole("button", { name: "重新处理 09 级数.pdf" }).click();
-  await expect(page.getByText("文件已重新处理。 ")).toBeVisible();
+  await expect(page.getByText("后台处理完成，资料状态已更新。")).toBeVisible();
 
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await expect(page.getByRole("heading", { name: "页面图像授权" })).toBeVisible();

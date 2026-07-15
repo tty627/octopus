@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
-from .config import load_global_config, save_global_config
+from .config import global_config_lock, load_global_config, save_global_config
 from .credentials import (
     CredentialStoreError,
     delete_stored_ai_api_key,
@@ -244,15 +244,14 @@ def register_workspace_routes(
             workspace = create_workspace(request.raw_path, request.name)
         except (OSError, ValueError) as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
-        if jobs.active(workspace.workspace_id, "workspace_sync"):
-            raise HTTPException(status.HTTP_409_CONFLICT, "Workspace sync is already running")
-
-        def execute() -> dict[str, Any]:
-            result = WorkspaceStore(workspace).sync()
+        def execute(progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+            result = WorkspaceStore(workspace).sync(progress)
             result["task_migration"] = migrate_legacy_tasks(workspace)
             return result
 
-        job = jobs.submit(workspace.workspace_id, "workspace_sync", execute)
+        job = jobs.submit_unique_with_progress(workspace.workspace_id, "workspace_sync", execute)
+        if job is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Workspace sync is already running")
         return {
             "workspace": WorkspaceStore(workspace).payload().model_dump(mode="json"),
             "job": job.model_dump(mode="json"),
@@ -270,15 +269,15 @@ def register_workspace_routes(
     )
     def workspace_sync(workspace_id: str) -> ServiceJob:
         store = _workspace_store(workspace_id)
-        if jobs.active(workspace_id, "workspace_sync"):
-            raise HTTPException(status.HTTP_409_CONFLICT, "Workspace sync is already running")
-
-        def execute() -> dict[str, Any]:
-            result = store.sync()
+        def execute(progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+            result = store.sync(progress)
             result["task_migration"] = migrate_legacy_tasks(store.workspace)
             return result
 
-        return jobs.submit(workspace_id, "workspace_sync", execute)
+        job = jobs.submit_unique_with_progress(workspace_id, "workspace_sync", execute)
+        if job is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Workspace sync is already running")
+        return job
 
     @app.post("/v2/workspaces/{workspace_id}/search", dependencies=authenticated)
     def workspace_search(
@@ -327,22 +326,32 @@ def register_workspace_routes(
             store.get_document(document_id)
         except FileNotFoundError as error:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
-        if jobs.active(workspace_id, "workspace_sync"):
-            raise HTTPException(status.HTTP_409_CONFLICT, "Workspace sync is already running")
-        return jobs.submit(
+        job = jobs.submit_unique_with_progress(
             workspace_id,
             "workspace_sync",
-            lambda: store.reprocess_document(document_id),
+            lambda progress: store.reprocess_document(document_id, progress),
         )
+        if job is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Workspace sync is already running")
+        return job
 
     @app.get(
         "/v2/workspaces/{workspace_id}/documents/{document_id}/pages/{page}/preview",
         response_class=FileResponse,
         dependencies=authenticated,
     )
-    def workspace_preview(workspace_id: str, document_id: str, page: int) -> FileResponse:
+    def workspace_preview(
+        workspace_id: str,
+        document_id: str,
+        page: int,
+        highlight: str = "",
+    ) -> FileResponse:
         try:
-            preview = _workspace_store(workspace_id).preview_path(document_id, page)
+            preview = _workspace_store(workspace_id).preview_path(
+                document_id,
+                page,
+                highlight,
+            )
         except FileNotFoundError as error:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
         except ValueError as error:
@@ -360,9 +369,10 @@ def register_workspace_routes(
         request: WorkspaceVisionRequest,
     ) -> dict[str, Any]:
         _workspace_store(workspace_id)
-        config = load_global_config()
-        config.workspaces[workspace_id].vision_enabled = request.vision_enabled
-        save_global_config(config)
+        with global_config_lock():
+            config = load_global_config()
+            config.workspaces[workspace_id].vision_enabled = request.vision_enabled
+            save_global_config(config)
         return {"workspace_id": workspace_id, "vision_enabled": request.vision_enabled}
 
     @app.get("/v2/workspaces/{workspace_id}/ai-settings", dependencies=authenticated)
@@ -380,30 +390,33 @@ def register_workspace_routes(
                 "api_key and clear_api_key cannot be supplied together",
             )
         _workspace_store(workspace_id)
-        config = load_global_config()
-        current = config.workspaces[workspace_id]
         previous_key = ""
+        previous_provider: str = request.provider
         try:
-            previous_key = read_stored_ai_api_key(workspace_id)
-            if request.clear_api_key:
-                delete_stored_ai_api_key(workspace_id)
-            elif request.api_key:
-                save_stored_ai_api_key(workspace_id, request.provider, request.api_key)
-            credential = resolve_ai_api_key(workspace_id, request.provider)
-            if request.enabled and not credential.api_key:
-                raise ValueError("An API key is required before AI can be enabled")
-            current.ai_policy.provider = request.provider
-            current.ai_policy.base_url = request.base_url
-            current.ai_policy.model = request.model
-            current.ai_policy.complex_model = request.model
-            current.ai_policy.enabled = request.enabled
-            save_global_config(config)
+            with global_config_lock():
+                config = load_global_config()
+                current = config.workspaces[workspace_id]
+                previous_provider = current.ai_policy.provider
+                previous_key = read_stored_ai_api_key(workspace_id)
+                if request.clear_api_key:
+                    delete_stored_ai_api_key(workspace_id)
+                elif request.api_key:
+                    save_stored_ai_api_key(workspace_id, request.provider, request.api_key)
+                credential = resolve_ai_api_key(workspace_id, request.provider)
+                if request.enabled and not credential.api_key:
+                    raise ValueError("An API key is required before AI can be enabled")
+                current.ai_policy.provider = request.provider
+                current.ai_policy.base_url = request.base_url
+                current.ai_policy.model = request.model
+                current.ai_policy.complex_model = request.model
+                current.ai_policy.enabled = request.enabled
+                save_global_config(config)
         except (CredentialStoreError, OSError, ValueError) as error:
             try:
                 if previous_key:
                     save_stored_ai_api_key(
                         workspace_id,
-                        current.ai_policy.provider,
+                        previous_provider,
                         previous_key,
                     )
                 elif request.api_key or request.clear_api_key:

@@ -26,6 +26,23 @@ export class ApiError extends Error {
 
 let bootstrapPromise: Promise<BootstrapPayload> | undefined;
 
+export function apiErrorMessage(status: number, detail: string): string {
+  if (status === 409) return "任务或同步状态已经变化，请重新载入。";
+  if (status === 404) return "所选资料或任务已经不可访问。";
+  if (status === 422) {
+    if (/overlaps existing workspace/i.test(detail)) {
+      return "所选文件夹与已有资料空间范围重叠，请选择不重叠的文件夹。";
+    }
+    if (/api.?key|credential|凭据/i.test(detail)) {
+      return "请填写有效的 API Key 后重试。";
+    }
+    if (/base.?url/i.test(detail)) return "Base URL 无效，请检查后重试。";
+    if (/model/i.test(detail)) return "模型名称无效，请检查后重试。";
+    return "输入内容无法处理，请检查标记的字段后重试。";
+  }
+  return "操作没有完成，请重试。";
+}
+
 export function runtimeBootstrap(): Promise<BootstrapPayload> {
   bootstrapPromise ??= bootstrapDesktop();
   return bootstrapPromise;
@@ -66,11 +83,7 @@ async function request<T>(
   }
   if (!response.ok) {
     const detail = await response.text();
-    let message = "操作没有完成，请重试。";
-    if (response.status === 409) message = "任务或同步状态已经变化，请重新载入。";
-    if (response.status === 404) message = "所选资料或任务已经不可访问。";
-    if (response.status === 422) message = "当前输入无法处理，请检查所选范围。";
-    throw new ApiError(message, response.status, detail);
+    throw new ApiError(apiErrorMessage(response.status, detail), response.status, detail);
   }
   if (response.headers.get("content-type")?.includes("text/plain")) {
     return (await response.text()) as T;
@@ -82,11 +95,13 @@ async function previewUrl(
   workspaceId: string,
   documentId: string,
   page: number,
+  highlight = "",
 ): Promise<string> {
   const runtime = await runtimeBootstrap();
   if (runtime.base_url.startsWith("mock:")) return mockPreviewUrl(documentId, page);
+  const highlightQuery = highlight ? `?highlight=${encodeURIComponent(highlight)}` : "";
   const response = await fetch(
-    `${runtime.base_url}/v2/workspaces/${workspaceId}/documents/${documentId}/pages/${page}/preview`,
+    `${runtime.base_url}/v2/workspaces/${workspaceId}/documents/${documentId}/pages/${page}/preview${highlightQuery}`,
     { headers: { Authorization: `Bearer ${runtime.token}` } },
   );
   if (!response.ok) throw new ApiError("页面预览暂时不可用。", response.status);
@@ -163,15 +178,7 @@ export const api = {
     request<string>(
       `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/markdown`,
     ),
+  jobs: (workspaceId: string, signal?: AbortSignal) =>
+    request<ServiceJob[]>(`/v2/jobs?workspace_id=${encodeURIComponent(workspaceId)}`, { signal }),
   job: (jobId: string) => request<ServiceJob>(`/v2/jobs/${jobId}`),
 };
-
-export async function waitForJob(jobId: string): Promise<ServiceJob> {
-  const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline) {
-    const job = await api.job(jobId);
-    if (job.status === "succeeded" || job.status === "failed") return job;
-    await new Promise((resolve) => window.setTimeout(resolve, 300));
-  }
-  throw new ApiError("后台处理超时，请稍后查看资料状态。", 0);
-}

@@ -14,11 +14,19 @@ import {
 } from "lucide-react";
 import { ApiError, api } from "../api";
 import { EMPTY_FILTERS, useAppStore } from "../store";
-import type { SearchReportV2, SearchResultV2 } from "../types";
-import { formatBytes, readabilityLabel } from "../utils";
+import type { SearchReportV2, SearchResultV2, WorkspaceEvidence } from "../types";
+import { documentQualityLabel, formatBytes, searchEvidenceText } from "../utils";
 
 interface SearchWorkspaceProps {
-  addResult: (result: SearchResultV2, defaultTitle?: string) => Promise<void>;
+  addResult: (
+    result: SearchResultV2,
+    evidence: WorkspaceEvidence,
+    defaultTitle?: string,
+    sourceWorkspaceId?: string,
+  ) => Promise<void>;
+  adding: boolean;
+  actionError: string;
+  clearActionError: () => void;
 }
 
 const extensionOptions = [
@@ -27,10 +35,16 @@ const extensionOptions = [
   { label: "Office", values: [".docx", ".xlsx", ".pptx"] },
 ];
 
-export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
+export function SearchWorkspace({
+  addResult,
+  adding,
+  actionError,
+  clearActionError,
+}: SearchWorkspaceProps) {
   const workspaceId = useAppStore((state) => state.workspaceId);
   const query = useAppStore((state) => state.query);
   const setQuery = useAppStore((state) => state.setQuery);
+  const setSubmittedQuery = useAppStore((state) => state.setSubmittedQuery);
   const filters = useAppStore((state) => state.filters);
   const setFilters = useAppStore((state) => state.setFilters);
   const assistedEnabled = useAppStore((state) => state.assistedEnabled);
@@ -39,6 +53,7 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
   const inspect = useAppStore((state) => state.inspect);
   const activeTask = useAppStore((state) => state.activeTask);
   const [report, setReport] = useState<SearchReportV2 | null>(null);
+  const [reportWorkspaceId, setReportWorkspaceId] = useState("");
   const [stage, setStage] = useState<"idle" | "searching" | "ready" | "degraded">("idle");
   const [filterOpen, setFilterOpen] = useState(false);
   const [error, setError] = useState("");
@@ -55,12 +70,27 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
 
   useEffect(() => () => controller.current?.abort(), []);
   useEffect(() => {
+    sequence.current += 1;
+    controller.current?.abort();
+    controller.current = null;
+    setReport(null);
+    setReportWorkspaceId("");
+    setStage("idle");
+    setError("");
+    setFilterOpen(false);
+    setSubmittedQuery("");
+    setFilters(EMPTY_FILTERS);
+    clearActionError();
+    inspect(null);
+  }, [clearActionError, inspect, setFilters, setSubmittedQuery, workspaceId]);
+  useEffect(() => {
     if (!assistedAvailable && assistedEnabled) setAssistedEnabled(false);
   }, [assistedAvailable, assistedEnabled, setAssistedEnabled]);
 
   const runSearch = async () => {
     const value = query.trim();
     if (!workspaceId || !value) return;
+    const requestedWorkspaceId = workspaceId;
     sequence.current += 1;
     const currentSequence = sequence.current;
     controller.current?.abort();
@@ -70,18 +100,23 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
     setError("");
     try {
       const result = await api.search(
-        workspaceId,
+        requestedWorkspaceId,
         value,
         assistedEnabled ? "assisted" : "local",
         filters,
         current.signal,
       );
-      if (currentSequence !== sequence.current) return;
+      if (
+        currentSequence !== sequence.current ||
+        useAppStore.getState().workspaceId !== requestedWorkspaceId
+      ) return;
       setReport(result);
+      setReportWorkspaceId(requestedWorkspaceId);
+      setSubmittedQuery(result.query);
       setStage(result.actual_mode === "degraded" ? "degraded" : "ready");
       inspect(result.results[0] ?? null);
     } catch (reason) {
-      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      if (reason instanceof Error && reason.name === "AbortError") return;
       if (currentSequence !== sequence.current) return;
       setStage("idle");
       setError(reason instanceof ApiError ? reason.message : "搜索没有完成，请重试。 ");
@@ -178,6 +213,14 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
         </div>
       )}
 
+      {actionError && (
+        <div className="pageError" role="alert">
+          <AlertTriangle size={19} />
+          <span>{actionError}</span>
+          <button className="iconButton" onClick={clearActionError} aria-label="关闭加入任务错误" title="关闭"><X size={17} /></button>
+        </div>
+      )}
+
       {!report && !error && stage === "idle" && (
         <div className="searchStart">
           <FileText size={27} />
@@ -190,7 +233,7 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
         </div>
       )}
 
-      {report && report.results.length === 0 && (
+      {report && reportWorkspaceId === workspaceId && report.results.length === 0 && (
         <div className="searchStart">
           <Search size={27} />
           <h2>没有找到匹配资料</h2>
@@ -198,7 +241,7 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
         </div>
       )}
 
-      {report && report.results.length > 0 && (
+      {report && reportWorkspaceId === workspaceId && report.results.length > 0 && (
         <section className="resultsSection" aria-label="搜索结果">
           <div className="resultList">
             {report.results.map((result) => (
@@ -206,9 +249,14 @@ export function SearchWorkspace({ addResult }: SearchWorkspaceProps) {
                 key={result.document_id}
                 result={result}
                 focused={inspector?.document_id === result.document_id}
-                inTask={Boolean(activeTask?.items.some((item) => item.document_id === result.document_id && item.page_number === result.best_evidence.page_number))}
+                inTask={Boolean(activeTask?.items.some((item) =>
+                  item.document_id === result.document_id &&
+                  item.page_number === result.best_evidence.page_number &&
+                  item.excerpt === result.best_evidence.excerpt
+                ))}
                 onInspect={() => inspect(result)}
-                onAdd={() => void addResult(result, query || "资料核对任务")}
+                adding={adding}
+                onAdd={() => void addResult(result, result.best_evidence, report.query || "资料核对任务", workspaceId)}
               />
             ))}
           </div>
@@ -222,16 +270,24 @@ function ResultRow({
   result,
   focused,
   inTask,
+  adding,
   onInspect,
   onAdd,
 }: {
   result: SearchResultV2;
   focused: boolean;
   inTask: boolean;
+  adding: boolean;
   onInspect: () => void;
   onAdd: () => void;
 }) {
   const evidence = result.best_evidence;
+  const qualityState = result.indexing_state === "failed"
+    ? "failed"
+    : result.indexing_state === "metadata_only"
+      ? "metadata"
+      : result.readability;
+  const lowQualityExcerpt = result.indexing_state === "indexed" && result.readability === "low";
   return (
     <article className={`resultRow ${focused ? "resultFocused" : ""}`} onClick={onInspect}>
       <button className="resultBody" onClick={onInspect} onFocus={onInspect} aria-label={result.name}>
@@ -244,19 +300,21 @@ function ResultRow({
           {evidence.page_number ? ` · 第 ${evidence.page_number} 页` : ""}
           {evidence.heading ? ` · ${evidence.heading}` : ""}
         </span>
-        <span className={result.readability === "low" ? "resultExcerpt lowExcerpt" : "resultExcerpt"}>
-          {result.readability === "low" ? "正文识别质量较低，可按文件名查找。" : evidence.excerpt}
+        <span className={lowQualityExcerpt ? "resultExcerpt lowExcerpt" : "resultExcerpt"}>
+          {searchEvidenceText(result.indexing_state, result.readability, evidence.excerpt)}
         </span>
         {result.additional_evidence.length > 0 && (
           <span className="moreEvidence">另有 {result.additional_evidence.length} 处命中</span>
         )}
       </button>
       <div className="resultMeta">
-        <span className={`qualityBadge quality-${result.readability}`}>{readabilityLabel(result.readability)}</span>
+        <span className={`qualityBadge quality-${qualityState}`}>
+          {documentQualityLabel(result.indexing_state, result.readability)}
+        </span>
         <span>{formatBytes(result.size_bytes)}</span>
       </div>
-      <button className="iconButton resultAdd" disabled={inTask} onClick={(event) => { event.stopPropagation(); onAdd(); }} aria-label={inTask ? `${result.name} 已加入任务` : `将 ${result.name} 加入任务`} title={inTask ? "已加入" : "加入任务"}>
-        {inTask ? <Check size={17} /> : <Plus size={17} />}
+      <button className="iconButton resultAdd" disabled={inTask || adding} onClick={(event) => { event.stopPropagation(); onAdd(); }} aria-label={inTask ? `${result.name} 已加入任务` : `将 ${result.name} 加入任务`} title={inTask ? "已加入" : adding ? "正在加入" : "加入任务"}>
+        {inTask ? <Check size={17} /> : adding ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}
       </button>
     </article>
   );

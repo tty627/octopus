@@ -138,6 +138,8 @@ p { line-height: 1.55; }
 .quality-readable { color: #236448; background: #e7f4ec; }
 .quality-partial { color: #845307; background: #fff1c9; }
 .quality-low { color: #9e332b; background: #ffe8e5; }
+.quality-metadata { color: #4f5f5b; background: #e9eeec; }
+.quality-failed { color: #842820; background: #f8dfdc; }
 .lowExcerpt { color: #7c493c; }
 
 .evidenceInspector { grid-column: 3; grid-row: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fbfcfb; border-left: 1px solid var(--border); z-index: 22; }
@@ -166,13 +168,15 @@ p { line-height: 1.55; }
 .emptyInspector { display: grid; justify-items: start; gap: 10px; padding: 24px 18px; color: var(--muted); }
 .emptyInspector p { max-width: 290px; }
 .inspectorActions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: auto; padding: 11px; border-top: 1px solid var(--border); background: var(--surface); }
+.inspectorActionError { display: flex; align-items: center; gap: 7px; padding: 9px 12px; color: #8e2c24; background: var(--danger-bg); border-top: 1px solid #efb8b2; font-size: 12px; }
 
-.pageError, .errorBox, .successBox, .connectionResult, .conflictNotice { display: flex; align-items: center; gap: 9px; margin: 13px 0; padding: 10px 12px; border: 1px solid; border-radius: 5px; font-size: 13px; }
+.pageError, .errorBox, .successBox, .warningBox, .connectionResult, .conflictNotice { display: flex; align-items: center; gap: 9px; margin: 13px 0; padding: 10px 12px; border: 1px solid; border-radius: 5px; font-size: 13px; }
 .pageError, .errorBox, .connectionError { color: #8e2c24; background: var(--danger-bg); border-color: #efb8b2; }
 .pageError span { flex: 1; }
 .successBox, .connectionSuccess { color: #256047; background: #ecf7f0; border-color: #b8dfc6; }
+.warningBox { color: #82520b; background: #fff7e8; border-color: #e7c98e; }
 
-.healthStrip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.healthStrip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .healthStrip > div { display: grid; gap: 3px; min-height: 84px; align-content: center; padding: 12px 16px; border-right: 1px solid var(--border); }
 .healthStrip > div:last-child { border-right: 0; }
 .healthStrip strong { font-size: 24px; }
@@ -180,7 +184,10 @@ p { line-height: 1.55; }
 .healthGood strong { color: #29704e; }
 .healthPartial strong { color: #a26308; }
 .healthLow strong { color: #a33830; }
+.healthFailed strong { color: #8e2c24; }
 .syncLine { display: flex; align-items: center; gap: 7px; min-height: 44px; color: var(--muted); font-size: 12px; }
+.jobStatusBox { display: flex; align-items: center; gap: 9px; margin: 0 0 13px; padding: 10px 12px; color: #315b52; background: #edf6f3; border: 1px solid #bad9d0; border-radius: 5px; font-size: 13px; }
+.jobStatusBox span, .errorBox span, .warningBox span { min-width: 0; overflow-wrap: anywhere; }
 .documentTable { margin-top: 14px; border-top: 1px solid var(--border); }
 .documentTableHeader { display: grid; grid-template-columns: minmax(0, 1fr) 110px 90px 46px; gap: 12px; min-height: 38px; align-items: center; color: var(--muted); border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 700; }
 .documentRow { display: grid; grid-template-columns: 20px minmax(0, 1fr) 110px 90px 36px; gap: 10px; min-height: 59px; align-items: center; border-bottom: 1px solid var(--border); }
@@ -241,7 +248,8 @@ p { line-height: 1.55; }
 .taskItemBody p { margin: 4px 0 0; color: #394541; font-size: 12px; line-height: 1.5; }
 .taskItem select { min-width: 0; height: 34px; padding: 0 6px; background: var(--surface); border: 1px solid var(--border); font-size: 11px; }
 .reviewToggle { display: flex; align-items: center; gap: 4px; min-height: 34px; font-size: 11px; }
-.conflictNotice { color: #8a5108; background: var(--amber-bg); border-color: #e5c481; }
+.conflictNotice { color: #8a5108; background: var(--amber-bg); border-color: #e5c481; flex-wrap: wrap; }
+.conflictNotice > span { flex: 1 1 300px; }
 
 .settingsForm { display: grid; gap: 0; }
 .settingsSection { display: grid; gap: 16px; padding: 21px 0; border-top: 1px solid var(--border); }
