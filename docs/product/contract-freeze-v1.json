@@ -14,7 +14,7 @@
       "index.query",
       "index.timeline"
     ],
-    "search_cache_schema": "0.5",
+    "search_cache_schema": "0.6",
     "search_report_schema": "1.0",
     "diagnostic_bundle_schema": "1.0"
   }

@@ -1,6 +1,6 @@
 # Octopus v0.8 兼容矩阵
 
-本矩阵描述 `1.0.0` 的工程支持边界。`octopus compatibility` 可输出同一组机器可读信息。
+本矩阵描述 `1.1.0.dev0` 的工程支持边界。`octopus compatibility` 可输出同一组机器可读信息。
 
 ## 平台
 
@@ -32,7 +32,7 @@
 | Markdown Index | `0.2` | 稳定 | v1.0 起承诺同主版本向前兼容 |
 | Local API | `1.0` | 稳定 | v1 内仅增加端点/可选字段 |
 | Plugin API | `1.0` | 稳定 | 不兼容范围在启动 Worker 前禁用 |
-| SQLite 搜索缓存 | `0.5` | 可重建 | 删除缓存后从已提交 Index 重建 |
+| SQLite 搜索缓存 | `0.6` | 可重建 | 首次使用自动从已提交 Index 重建 |
 
 ## 长路径、权限与同步状态
 

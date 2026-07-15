@@ -31,7 +31,16 @@ REQUIRED_HEADINGS = {
     "## 退出条件",
 }
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((<[^>]+>|[^)]+)\)")
-IGNORED_DOCUMENTATION_DIRS = {".git", ".pytest_cache", ".venv", ".octopus-dev", "dist"}
+IGNORED_DOCUMENTATION_DIRS = {
+    ".git",
+    ".pytest_cache",
+    ".venv",
+    ".octopus-dev",
+    "dist",
+    "node_modules",
+    "playwright-report",
+    "test-results",
+}
 
 
 def repository_markdown_files() -> list[Path]:

@@ -40,6 +40,10 @@ def test_local_api_auth_repository_search_and_jobs(
         health = client.get("/v1/health")
         assert health.status_code == 200
         assert health.json()["version"] == __version__
+        ui = client.get("/ui/")
+        assert ui.status_code == 200
+        assert "default-src 'self'" in ui.headers["content-security-policy"]
+        assert "http://" not in ui.text and "https://" not in ui.text
         assert client.get("/v1/repositories").status_code == 401
         assert (
             client.get(
@@ -76,6 +80,19 @@ def test_local_api_auth_repository_search_and_jobs(
         assert search.json()["results"][0]["match_reasons"]
         assert search.json()["results"][0]["match_evidence"]
         assert search.json()["results"][0]["open_target_uri"].startswith("file:")
+        filtered = client.post(
+            f"/v1/repositories/{repository_id}/search",
+            headers=headers,
+            json={
+                "query": "local API",
+                "filters": {"index_types": ["text"], "path_prefix": "roadmap"},
+            },
+        )
+        assert filtered.status_code == 200
+        assert [item["name"] for item in filtered.json()["results"]] == ["roadmap.txt"]
+        assert filtered.json()["results"][0]["content_id"]
+        assert filtered.json()["results"][0]["modified_at"]
+        assert filtered.json()["results"][0]["size_bytes"] > 0
         legacy_auto = client.post(
             f"/v1/repositories/{repository_id}/search",
             headers=headers,
@@ -89,6 +106,105 @@ def test_local_api_auth_repository_search_and_jobs(
             json={"query": "local API", "mode": "local", "full": False},
         )
         assert conflicting.status_code == 422
+
+        created_pack = client.post(
+            f"/v1/repositories/{repository_id}/task-packs",
+            headers=headers,
+            json={"title": "API review", "goal": "Review local API evidence"},
+        )
+        assert created_pack.status_code == 201
+        pack = created_pack.json()
+        result = filtered.json()["results"][0]
+        item = {
+            "item_id": "item-roadmap",
+            "node_id": result["node_id"],
+            "name": result["name"],
+            "index_type": result["index_type"],
+            "raw_relative_path": result["raw_relative_path"],
+            "content_id": result["content_id"],
+            "status_snapshot": result["status"],
+            "anchors": result["evidence"],
+            "rationale": "Primary result",
+            "slot_id": pack["slots"][0]["slot_id"],
+            "review_state": "pending",
+            "position": 0,
+        }
+        pack["items"] = [item]
+        updated_pack = client.put(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}",
+            headers=headers,
+            json={"expected_revision": pack["revision"], "task_pack": pack},
+        )
+        assert updated_pack.status_code == 200
+        pack = updated_pack.json()
+        stale_update = client.put(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}",
+            headers=headers,
+            json={"expected_revision": 1, "task_pack": pack},
+        )
+        assert stale_update.status_code == 409
+        markdown = client.get(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}/markdown",
+            headers=headers,
+        )
+        assert markdown.status_code == 200
+        assert "# API review" in markdown.text
+        assert "Primary result" in markdown.text
+        rejected_package = client.post(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}/package",
+            headers=headers,
+            json={
+                "output_path": str(index.parent / "rejected-package"),
+                "confirmed_item_ids": ["item-roadmap"],
+            },
+        )
+        assert rejected_package.status_code == 422
+
+        pack["items"][0]["review_state"] = "confirmed"
+        confirmed_pack = client.put(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}",
+            headers=headers,
+            json={"expected_revision": pack["revision"], "task_pack": pack},
+        )
+        assert confirmed_pack.status_code == 200
+        pack = confirmed_pack.json()
+        nonempty_path = index.parent / "nonempty-package"
+        nonempty_path.mkdir()
+        (nonempty_path / "keep.txt").write_text("keep", encoding="utf-8")
+        nonempty_package = client.post(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}/package",
+            headers=headers,
+            json={
+                "output_path": str(nonempty_path),
+                "confirmed_item_ids": ["item-roadmap"],
+            },
+        )
+        assert nonempty_package.status_code == 422
+        assert (nonempty_path / "keep.txt").read_text(encoding="utf-8") == "keep"
+        package_path = index.parent / "task-package"
+        package = client.post(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}/package",
+            headers=headers,
+            json={
+                "output_path": str(package_path),
+                "confirmed_item_ids": ["item-roadmap"],
+            },
+        )
+        assert package.status_code == 202
+        package_job = _wait_for_job(client, headers, package.json()["job_id"])
+        assert package_job["status"] == "succeeded", package_job
+        assert (package_path / "package-manifest.json").is_file()
+
+        archived = client.post(
+            f"/v1/repositories/{repository_id}/task-packs/{pack['task_pack_id']}/archive",
+            headers=headers,
+            json={"expected_revision": pack["revision"]},
+        )
+        assert archived.status_code == 200
+        assert archived.json()["lifecycle"] == "archived"
+        assert client.get(
+            f"/v1/repositories/{repository_id}/task-packs", headers=headers
+        ).json() == []
         validation = client.post(f"/v1/repositories/{repository_id}/validate", headers=headers)
         assert validation.status_code == 200
         assert validation.json()["error_count"] == 0
@@ -155,10 +271,19 @@ def test_v1_contract_and_repository_creation_workflow(
     app = create_app(token=TOKEN, start_scheduler=False)
 
     with TestClient(app) as client:
+        preflight = client.post(
+            "/v1/repositories/preflight",
+            headers=headers,
+            json={"raw_path": str(raw), "index_path": str(index)},
+        )
+        assert preflight.status_code == 200
+        assert preflight.json()["file_count"] == 1
+        assert preflight.json()["blockers"] == []
         contract = client.get("/v1/contract", headers=headers)
         assert contract.status_code == 200
         assert contract.json()["contract_version"] == "1.0"
         assert "local_diagnostics" in contract.json()["features"]
+        assert "task_packs" in contract.json()["features"]
         created = client.post(
             "/v1/repositories",
             headers=headers,

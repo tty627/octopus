@@ -204,6 +204,42 @@ def _sanitized_search_results(
     return sanitized, sources
 
 
+def _sanitized_search_results_by_ids(
+    index: Path, node_ids: set[str]
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    documents = SearchIndex(index).documents_by_ids(sorted(node_ids))
+    sanitized: list[dict[str, Any]] = []
+    sources: dict[str, str] = {}
+    for document in documents:
+        risk_flags = (
+            []
+            if document.status in {"clean", "indexed"}
+            else [f"status:{document.status}"]
+        )
+        risk_flags.extend(f"quality:{flag}" for flag in document.quality_flags)
+        sanitized.append(
+            {
+                "node_id": document.node_id,
+                "name": document.name,
+                "index_type": document.index_type,
+                "summary": document.summary,
+                "status": document.status,
+                "risk_flags": risk_flags,
+                "evidence": [
+                    {
+                        "locator": item.locator,
+                        "kind": item.kind,
+                        "text_excerpt": item.text_excerpt,
+                    }
+                    for item in document.evidence[:5]
+                ],
+            }
+        )
+        if document.source_uri:
+            sources[document.node_id] = document.source_uri
+    return sanitized, sources
+
+
 def _timeline_signals(index: Path) -> list[dict[str, str]]:
     config = load_repository_config(index)
     state = load_repository_state(index, config)
@@ -333,6 +369,7 @@ def run_plugin(
     granted_permissions: set[str],
     query: str = "",
     confirmed_node_ids: set[str] | None = None,
+    selected_node_ids: set[str] | None = None,
     timeout_seconds: float = 30.0,
 ) -> PluginRunReport:
     root, manifest = load_plugin_manifest(plugin_path)
@@ -347,11 +384,16 @@ def run_plugin(
     resources: dict[str, Any] = {}
     source_uris: dict[str, str] = {}
     if "index.query" in manifest.permissions:
-        if not query.strip():
+        if selected_node_ids is not None:
+            resources["search_results"], source_uris = _sanitized_search_results_by_ids(
+                index_repository, selected_node_ids
+            )
+        elif not query.strip():
             raise ValueError("index.query plugins require a query")
-        resources["search_results"], source_uris = _sanitized_search_results(
-            index_repository, query
-        )
+        else:
+            resources["search_results"], source_uris = _sanitized_search_results(
+                index_repository, query
+            )
         resources["confirmed_node_ids"] = sorted(confirmed)
     if "index.timeline" in manifest.permissions:
         resources["timeline_signals"] = _timeline_signals(index_repository)

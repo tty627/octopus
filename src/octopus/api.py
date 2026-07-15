@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__
@@ -20,10 +23,25 @@ from .config import (
 from .diagnostics import create_diagnostic_bundle
 from .engine import UpdateEngine
 from .migrations import plan_migrations
-from .models import ServiceJob
+from .models import SearchFilters, ServiceJob, TaskPack
+from .onboarding import estimate_repository
+from .plugin_sdk import reference_plugins_directory, run_plugin
+from .sample_data import default_sample_paths, materialize_sample_repository
 from .search import SearchIndex
 from .service_control import ensure_service_token
 from .service_runtime import JobManager, RepositoryScheduler
+from .task_packs import (
+    TaskPackConflictError,
+    TaskPackError,
+    TaskPackNotFoundError,
+    TaskPackVersionError,
+    archive_task_pack,
+    create_task_pack,
+    list_task_packs,
+    load_task_pack,
+    render_task_pack_markdown,
+    save_task_pack,
+)
 from .transactions import load_run_report
 from .validation import validate_repository
 
@@ -44,6 +62,7 @@ class SearchRequest(BaseModel):
     mode: Literal["local", "auto"] | None = None
     full: bool | None = None
     limit: int = Field(default=20, ge=1, le=100)
+    filters: SearchFilters | None = None
 
 
 class RepositoryCreateRequest(BaseModel):
@@ -51,6 +70,35 @@ class RepositoryCreateRequest(BaseModel):
     index_path: Path
     name: str | None = Field(default=None, max_length=200)
     build: bool = True
+
+
+class RepositoryPreflightRequest(BaseModel):
+    raw_path: Path
+    index_path: Path
+    ai_enabled: bool = False
+
+
+class SampleRepositoryCreateRequest(BaseModel):
+    name: str = Field(default="Octopus 示例资料", min_length=1, max_length=200)
+
+
+class TaskPackCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    goal: str = Field(default="", max_length=2_000)
+
+
+class TaskPackUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    task_pack: TaskPack
+
+
+class TaskPackArchiveRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+class TaskPackPackageRequest(BaseModel):
+    output_path: Path
+    confirmed_item_ids: list[str] = Field(min_length=1, max_length=1_000)
 
 
 class DiagnosticCreateRequest(BaseModel):
@@ -78,6 +126,7 @@ def _repository_payload(repository_id: str, index: Path) -> dict[str, Any]:
         "raw_repository_path": config.repository.raw_repository_path,
         "index_repository_path": str(index),
         "scan": state.scan.model_dump(mode="json"),
+        "last_successful_update_at": state.repository.last_successful_update_at,
         "states": counts,
         "queues": state.queues.model_dump(mode="json"),
     }
@@ -112,12 +161,31 @@ def create_app(
     )
     app.state.jobs = jobs
     app.state.scheduler = scheduler
+    ui_directory = Path(__file__).resolve().parent / "ui_dist"
+    if ui_directory.is_dir() and (ui_directory / "assets").is_dir():
+        app.mount(
+            "/ui/assets",
+            StaticFiles(directory=ui_directory / "assets"),
+            name="octopus-ui-assets",
+        )
+
+    @app.middleware("http")
+    async def ui_security_headers(request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        if request.url.path.startswith("/ui"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'"
+            )
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        return response
     if global_service.allowed_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=global_service.allowed_origins,
             allow_credentials=False,
-            allow_methods=["GET", "POST"],
+            allow_methods=["GET", "POST", "PUT"],
             allow_headers=["Authorization", "Content-Type"],
         )
 
@@ -155,6 +223,10 @@ def create_app(
                 "search_repair",
                 "migration_plan",
                 "local_diagnostics",
+                "repository_preflight",
+                "sample_repository",
+                "task_packs",
+                "task_pack_package",
             ],
         }
 
@@ -182,6 +254,49 @@ def create_app(
                 item["available"] = False
             payload.append(item)
         return payload
+
+    @app.post("/v1/repositories/preflight", dependencies=authenticated)
+    def repository_preflight(request: RepositoryPreflightRequest) -> dict[str, Any]:
+        return estimate_repository(
+            request.raw_path,
+            request.index_path,
+            ai_enabled=request.ai_enabled,
+        ).model_dump(mode="json")
+
+    @app.post(
+        "/v1/repositories/sample",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=authenticated,
+    )
+    def create_sample_repository(request: SampleRepositoryCreateRequest) -> dict[str, Any]:
+        raw, index = default_sample_paths()
+        raw_existed = raw.exists()
+        index_existed = index.exists()
+        try:
+            materialize_sample_repository(raw)
+            config = create_repository(
+                raw,
+                index,
+                request.name,
+                ai_enabled=False,
+                require_empty=True,
+            )
+        except (OSError, ValueError) as error:
+            if not raw_existed:
+                shutil.rmtree(raw, ignore_errors=True)
+            if not index_existed:
+                shutil.rmtree(index, ignore_errors=True)
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        repository_id = config.repository.raw_repo_id
+        job = jobs.submit(
+            repository_id,
+            "update",
+            lambda: asdict(UpdateEngine(index).run(force_path="*")),
+        )
+        return {
+            "repository": _repository_payload(repository_id, index),
+            "job": job.model_dump(mode="json"),
+        }
 
     @app.post(
         "/v1/repositories",
@@ -279,9 +394,176 @@ def create_app(
             "auto" if request.full else "local"
         )
         search_index = SearchIndex(_repository_path(repository_id))
-        return search_index.search_report(request.query, request.limit, mode).model_dump(
-            mode="json"
+        return search_index.search_report(
+            request.query,
+            request.limit,
+            mode,
+            request.filters,
+        ).model_dump(mode="json")
+
+    @app.get(
+        "/v1/repositories/{repository_id}/task-packs",
+        dependencies=authenticated,
+    )
+    def task_pack_list(
+        repository_id: str, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
+        index = _repository_path(repository_id)
+        return [
+            item.model_dump(mode="json")
+            for item in list_task_packs(
+                index, repository_id, include_archived=include_archived
+            )
+        ]
+
+    @app.post(
+        "/v1/repositories/{repository_id}/task-packs",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=authenticated,
+    )
+    def task_pack_create(
+        repository_id: str, request: TaskPackCreateRequest
+    ) -> dict[str, Any]:
+        pack = create_task_pack(
+            _repository_path(repository_id), repository_id, request.title, request.goal
         )
+        return pack.model_dump(mode="json")
+
+    @app.get(
+        "/v1/repositories/{repository_id}/task-packs/{task_pack_id}",
+        dependencies=authenticated,
+    )
+    def task_pack_get(repository_id: str, task_pack_id: str) -> dict[str, Any]:
+        try:
+            pack = load_task_pack(_repository_path(repository_id), task_pack_id)
+        except TaskPackNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except TaskPackVersionError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        if pack.repository_id != repository_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Task pack not found")
+        return pack.model_dump(mode="json")
+
+    @app.put(
+        "/v1/repositories/{repository_id}/task-packs/{task_pack_id}",
+        dependencies=authenticated,
+    )
+    def task_pack_update(
+        repository_id: str,
+        task_pack_id: str,
+        request: TaskPackUpdateRequest,
+    ) -> dict[str, Any]:
+        try:
+            pack = save_task_pack(
+                _repository_path(repository_id),
+                task_pack_id,
+                repository_id,
+                request.expected_revision,
+                request.task_pack,
+            )
+        except TaskPackNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except (TaskPackConflictError, TaskPackVersionError) as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        except TaskPackError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        return pack.model_dump(mode="json")
+
+    @app.post(
+        "/v1/repositories/{repository_id}/task-packs/{task_pack_id}/archive",
+        dependencies=authenticated,
+    )
+    def task_pack_archive(
+        repository_id: str,
+        task_pack_id: str,
+        request: TaskPackArchiveRequest,
+    ) -> dict[str, Any]:
+        try:
+            pack = archive_task_pack(
+                _repository_path(repository_id),
+                task_pack_id,
+                repository_id,
+                request.expected_revision,
+            )
+        except TaskPackNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except (TaskPackConflictError, TaskPackVersionError) as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        except TaskPackError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        return pack.model_dump(mode="json")
+
+    @app.get(
+        "/v1/repositories/{repository_id}/task-packs/{task_pack_id}/markdown",
+        response_class=PlainTextResponse,
+        dependencies=authenticated,
+    )
+    def task_pack_markdown(repository_id: str, task_pack_id: str) -> str:
+        try:
+            pack = load_task_pack(_repository_path(repository_id), task_pack_id)
+        except TaskPackNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        if pack.repository_id != repository_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Task pack not found")
+        return render_task_pack_markdown(pack)
+
+    @app.post(
+        "/v1/repositories/{repository_id}/task-packs/{task_pack_id}/package",
+        response_model=ServiceJob,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=authenticated,
+    )
+    def task_pack_package(
+        repository_id: str,
+        task_pack_id: str,
+        request: TaskPackPackageRequest,
+    ) -> ServiceJob:
+        index = _repository_path(repository_id)
+        if request.output_path.exists() and (
+            not request.output_path.is_dir() or any(request.output_path.iterdir())
+        ):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Package output directory must be empty",
+            )
+        try:
+            pack = load_task_pack(index, task_pack_id)
+        except TaskPackNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        if pack.repository_id != repository_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Task pack not found")
+        by_item_id = {item.item_id: item for item in pack.items}
+        selected = [by_item_id.get(item_id) for item_id in request.confirmed_item_ids]
+        if any(item is None for item in selected):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown task pack item")
+        node_ids = {
+            item.node_id
+            for item in selected
+            if item is not None and item.review_state == "confirmed"
+        }
+        if len(node_ids) != len(selected):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Only confirmed task pack items can be packaged",
+            )
+
+        def execute_package() -> dict[str, Any]:
+            report = run_plugin(
+                reference_plugins_directory() / "package",
+                index,
+                request.output_path,
+                granted_permissions={
+                    "index.query",
+                    "export.write",
+                    "export.copy_confirmed",
+                },
+                query=pack.goal or pack.title,
+                confirmed_node_ids=node_ids,
+                selected_node_ids=node_ids,
+            )
+            return report.model_dump(mode="json")
+
+        return jobs.submit(repository_id, "package", execute_package)
 
     @app.post("/v1/repositories/{repository_id}/validate", dependencies=authenticated)
     def validate(repository_id: str) -> dict[str, Any]:
@@ -320,6 +602,19 @@ def create_app(
         except (OSError, ValueError) as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
         return {"created": True, "file": created.name, "local_only": True, "uploaded": False}
+
+    if ui_directory.is_dir() and (ui_directory / "index.html").is_file():
+
+        @app.get("/ui", include_in_schema=False)
+        def ui_redirect() -> RedirectResponse:
+            return RedirectResponse("/ui/")
+
+        @app.get("/ui/{asset_path:path}", include_in_schema=False)
+        def ui(asset_path: str) -> FileResponse:
+            requested = (ui_directory / asset_path).resolve()
+            if ui_directory.resolve() in requested.parents and requested.is_file():
+                return FileResponse(requested)
+            return FileResponse(ui_directory / "index.html")
 
     return app
 

@@ -11,3 +11,6 @@ build/
 release/
 .venv/
 .octopus-dev/
+frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/

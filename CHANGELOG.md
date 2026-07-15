@@ -6,6 +6,27 @@
 
 No changes yet.
 
+## [1.1.0.dev0] - 2026-07-15 (development build)
+
+### Added
+
+- React/TypeScript + WebView2 桌面工作台，包含资料空间向导、工作台、搜索、证据检查器、任务包和健康恢复入口。
+- 本地结果先到、AI 可选后补的搜索交互，以及类型、路径、状态、质量和修改时间筛选。
+- 单资料空间任务包 `1.0` Schema、原子保存、revision 冲突、归档、800ms 自动保存和断线本地草稿。
+- 任务包确定性 Markdown/Markmap 兼容导出，以及只复制再次确认来源的 Package 异步导出。
+- Local API 资料空间预检、示例资料和任务包端点；搜索结果新增可选内容标识、修改时间和大小。
+
+### Changed
+
+- `octopus-gui` 与 `Octopus.exe` 直接启动 WebView2 界面，不再提供 Tkinter 回退入口。
+- 可重建搜索缓存 Schema 从 `0.5` 升至 `0.6`，首次使用自动重建，不迁移 Raw 或 Markdown 索引。
+- Windows 构建和 CI 在 Python 门禁前增加 Node 22、ESLint、TypeScript、Vitest、前端构建与 Playwright 检查。
+
+### Security
+
+- WebView bootstrap token 仅保存在进程内存；Native bridge 仅开放目录选择、用户确认的文本保存、本地 URI 打开和窗口状态白名单。
+- `/ui/` 静态资源使用本地 CSP 与安全响应头，生产界面不依赖远程资源。
+
 ## [1.0.0] - 2026-07-14 (engineering final; not tagged or publicly released)
 
 ### Added

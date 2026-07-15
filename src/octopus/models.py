@@ -371,6 +371,9 @@ class SearchDocument(OctopusModel):
     body_excerpt: str = ""
     status: str = "clean"
     source_uri: str = ""
+    content_id: str = ""
+    modified_at: str = ""
+    size_bytes: int = Field(default=0, ge=0)
     evidence: list[ExtractionEvidence] = Field(default_factory=list)
     quality_flags: list[str] = Field(default_factory=list)
     truncated: bool = False
@@ -394,6 +397,15 @@ class SearchResult(SearchDocument):
     risk_flags: list[str] = Field(default_factory=list)
     recommended_open_target: Literal["index", "source"] = "index"
     open_target_uri: str = ""
+
+
+class SearchFilters(OctopusModel):
+    index_types: list[Literal["text", "leaf", "foldernode"]] = Field(default_factory=list)
+    path_prefix: str = Field(default="", max_length=2_000)
+    statuses: list[str] = Field(default_factory=list, max_length=20)
+    quality_flags: list[str] = Field(default_factory=list, max_length=50)
+    modified_after: str = ""
+    modified_before: str = ""
 
 
 class SearchCitation(OctopusModel):
@@ -427,6 +439,59 @@ class SearchReport(OctopusModel):
     candidate_count: int = 0
     duration_ms: int = Field(default=0, ge=0)
     ai_usage: AIUsage = Field(default_factory=AIUsage)
+
+
+class TaskPackSlot(OctopusModel):
+    slot_id: str
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=1_000)
+    position: int = Field(default=0, ge=0)
+    required: bool = False
+
+
+class TaskPackItem(OctopusModel):
+    item_id: str
+    node_id: str
+    name: str = Field(min_length=1, max_length=500)
+    index_type: Literal["text", "leaf", "foldernode"]
+    raw_relative_path: str = ""
+    content_id: str = ""
+    status_snapshot: str = "clean"
+    anchors: list[ExtractionEvidence] = Field(default_factory=list)
+    rationale: str = Field(default="", max_length=2_000)
+    slot_id: str
+    review_state: Literal["confirmed", "pending"] = "confirmed"
+    position: int = Field(default=0, ge=0)
+    added_at: str = Field(default_factory=utc_now)
+
+
+class TaskPack(OctopusModel):
+    schema_version: str = "1.0"
+    task_pack_id: str
+    repository_id: str
+    revision: int = Field(default=1, ge=1)
+    lifecycle: Literal["draft", "saved", "archived"] = "draft"
+    title: str = Field(min_length=1, max_length=200)
+    goal: str = Field(default="", max_length=2_000)
+    slots: list[TaskPackSlot] = Field(default_factory=list)
+    items: list[TaskPackItem] = Field(default_factory=list)
+    excluded_node_ids: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+
+class TaskPackSummary(OctopusModel):
+    schema_version: str = "1.0"
+    task_pack_id: str
+    repository_id: str
+    revision: int = 1
+    lifecycle: str = "draft"
+    title: str
+    goal: str = ""
+    item_count: int = 0
+    pending_count: int = 0
+    updated_at: str = ""
+    writable: bool = True
 
 
 class TransactionStatus(StrEnum):
@@ -551,7 +616,7 @@ class JobStatus(StrEnum):
 class ServiceJob(OctopusModel):
     job_id: str
     repository_id: str
-    kind: Literal["update", "rebuild_search", "validate"]
+    kind: Literal["update", "rebuild_search", "validate", "package"]
     status: JobStatus = JobStatus.queued
     created_at: str = Field(default_factory=utc_now)
     started_at: str = ""

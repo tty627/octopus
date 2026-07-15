@@ -66,6 +66,30 @@ Get-ChildItem -LiteralPath $ReleaseDirectory -File | Remove-Item -Force
 
 & $Python -m pip install -e ".[dev,build]"
 Assert-NativeSuccess "Install build dependencies"
+$NpmCommand = Get-Command npm -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $NpmCommand) {
+    throw "Node.js/npm is required to build the Octopus desktop UI"
+}
+Push-Location frontend
+try {
+    & $NpmCommand.Source ci
+    Assert-NativeSuccess "Install frontend dependencies"
+    if (-not $SkipTests) {
+        & $NpmCommand.Source run lint
+        Assert-NativeSuccess "Frontend ESLint"
+        & $NpmCommand.Source run typecheck
+        Assert-NativeSuccess "Frontend TypeScript"
+        & $NpmCommand.Source test
+        Assert-NativeSuccess "Frontend Vitest"
+        & $NpmCommand.Source run e2e
+        Assert-NativeSuccess "Frontend Playwright"
+    }
+    & $NpmCommand.Source run build
+    Assert-NativeSuccess "Frontend production build"
+}
+finally {
+    Pop-Location
+}
 if (-not $SkipTests) {
     & $Python -m pytest --cov=octopus --cov-report=term-missing --cov-fail-under=85
     Assert-NativeSuccess "pytest"
@@ -119,7 +143,26 @@ if (-not $SkipInstaller) {
         $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
     }
     if (-not (Test-Path -LiteralPath $Iscc)) {
+        $InnoRegistration = Get-ItemProperty `
+            HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* `
+            -ErrorAction SilentlyContinue |
+            Where-Object DisplayName -Like "Inno Setup version 6*" |
+            Select-Object -First 1
+        if ($InnoRegistration -and $InnoRegistration.InstallLocation) {
+            $Iscc = Join-Path $InnoRegistration.InstallLocation "ISCC.exe"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Iscc)) {
         throw "Inno Setup 6.7.1 compiler not found"
+    }
+    $InnoLanguageDirectory = Join-Path (Split-Path -Parent $Iscc) "Languages"
+    $ChineseLanguage = Join-Path $InnoLanguageDirectory "ChineseSimplified.isl"
+    if (-not (Test-Path -LiteralPath $ChineseLanguage)) {
+        & (Join-Path $Root "packaging\install_inno_language.ps1") `
+            -LanguageDirectory $InnoLanguageDirectory
+        if (-not (Test-Path -LiteralPath $ChineseLanguage)) {
+            throw "Inno Setup Simplified Chinese language was not installed"
+        }
     }
     $InnoVersion = (Get-Item -LiteralPath $Iscc).VersionInfo.ProductVersion
     if ($Release -and -not $InnoVersion.StartsWith("6.7.1")) {

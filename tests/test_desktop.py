@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import inspect
+import sys
 from typing import Any
 
 import pytest
 
-import octopus.desktop as desktop_module
+import octopus.desktop_shell as desktop_shell_module
+from octopus import __version__
 from octopus.api import API_CONTRACT_VERSION
-from octopus.desktop import DESKTOP_SHORTCUTS, desktop_scale
 from octopus.desktop_client import (
     DesktopController,
     DesktopServiceError,
     LocalApiClient,
     recovery_guidance,
 )
+from octopus.desktop_shell import DesktopBridge, _file_uri_path, smoke_test
+from octopus.runtime import octopus_command
 
 
 class FakeDesktopApi:
@@ -164,18 +167,90 @@ def test_runtime_client_starts_service_and_uses_current_token(
     assert client.token == "token"
 
 
-def test_desktop_accessibility_contract_has_keyboard_and_high_dpi_support() -> None:
-    assert DESKTOP_SHORTCUTS == {
-        "focus_search": "<Control-f>",
-        "add_repository": "<Control-n>",
-        "refresh": "<F5>",
+def test_runtime_client_restarts_an_older_local_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    versions = iter(["1.0.0", __version__])
+    stopped: list[bool] = []
+    started: list[bool] = []
+    monkeypatch.setattr(
+        "octopus.desktop_client.api_status",
+        lambda: {"running": True, "healthy": True, "host": "127.0.0.1", "port": 8765},
+    )
+    monkeypatch.setattr(
+        "octopus.desktop_client.stop_api_process",
+        lambda: stopped.append(True) or {"running": False},
+    )
+    monkeypatch.setattr(
+        "octopus.desktop_client.start_api_process",
+        lambda: started.append(True)
+        or {"running": True, "healthy": True, "host": "127.0.0.1", "port": 8765},
+    )
+    monkeypatch.setattr("octopus.desktop_client.ensure_service_token", lambda: "token")
+    monkeypatch.setattr(
+        LocalApiClient,
+        "contract",
+        lambda self: {"product_version": next(versions)},
+    )
+
+    client = LocalApiClient.from_runtime(required_product_version=__version__)
+
+    assert client.base_url == "http://127.0.0.1:8765"
+    assert stopped == [True]
+    assert started == [True]
+
+
+def test_frozen_gui_uses_sibling_cli_for_background_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    gui = tmp_path / "Octopus.exe"
+    cli = tmp_path / "octopus-cli.exe"
+    gui.write_bytes(b"")
+    cli.write_bytes(b"")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(gui))
+
+    assert octopus_command("_api-run", "--port", "8765") == [
+        str(cli),
+        "_api-run",
+        "--port",
+        "8765",
+    ]
+
+
+def test_webview_bridge_bootstrap_and_local_uri_policy(tmp_path: Any) -> None:
+    client = LocalApiClient("http://127.0.0.1:9876", "memory-token")
+    bridge = DesktopBridge(client)
+    assert bridge.bootstrap()["token"] == "memory-token"
+    source = tmp_path / "source.txt"
+    source.write_text("evidence", encoding="utf-8")
+    assert _file_uri_path(source.as_uri()) == source.resolve()
+    with pytest.raises(ValueError, match="Only local file URIs"):
+        _file_uri_path("https://example.com/source.txt")
+    assert smoke_test() == 0
+
+
+def test_webview_bridge_only_exposes_whitelisted_public_state() -> None:
+    bridge = DesktopBridge(LocalApiClient("http://127.0.0.1:9876", "memory-token"))
+
+    assert "client" not in vars(bridge)
+    assert "window" not in vars(bridge)
+    assert {name for name in dir(bridge) if not name.startswith("_")} == {
+        "bootstrap",
+        "choose_directory",
+        "load_ui_state",
+        "open_uri",
+        "save_text_file",
+        "save_ui_state",
+        "suggest_index_path",
     }
-    assert desktop_scale(96.0) == pytest.approx(4 / 3)
-    assert desktop_scale(192.0) == pytest.approx(8 / 3)
 
 
-def test_desktop_presentation_layer_does_not_import_repository_core() -> None:
-    source = inspect.getsource(desktop_module)
+def test_desktop_presentation_layer_has_no_tkinter_or_repository_core() -> None:
+    source = inspect.getsource(desktop_shell_module)
+    assert "tkinter" not in source
     assert "from .engine import" not in source
     assert "from .search import" not in source
-    assert "from .config import" not in source
+    assert 'min_size=(1100, 720)' in source
+    assert "required_product_version=__version__" in source

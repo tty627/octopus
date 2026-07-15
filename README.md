@@ -5,12 +5,15 @@ Octopus 是一个本地优先、以链接为中心的文件索引工具。它会
 FolderNode 索引，让用户或智能体无需反复打开非文本原文件即可检索这些索引。
 
 当前正式打 Tag 的版本是 `0.3.0`；v0.4-v0.9 均为已关闭的工程里程碑。
-工程最终候选版本为 `1.0.0`，但尚未打 Tag、签名或作为公开 GA 版本发布。
+当前开发版本为 `1.1.0.dev0`，以 React/TypeScript + Windows WebView2 任务工作台替换旧桌面界面；
+`1.0.0` 是尚未公开发布的工程最终候选版本。
 v0.1 和 v0.2 是内部里程碑，没有正式 Git Release Tag。
 
 ## 产品与发布文档
 
 - [产品版本迭代总规范](<docs/product/Octopus产品版本迭代总规范.md>)
+- [产品设计方案](docs/product/OCTOPUS_PRODUCT_DESIGN_PROPOSAL.md)与
+  [前端 UI/UX 草案](docs/product/OCTOPUS_FRONTEND_UI_UX_DRAFT.md)
 - [路线图](docs/product/ROADMAP.md)、[指标](docs/product/METRICS.md)，以及
   [性能基线](docs/product/PERFORMANCE_BASELINE.md) / [搜索评估基线](docs/product/SEARCH_EVALUATION_BASELINE.md)
 - [版本、分支与兼容性](docs/product/VERSIONING_AND_COMPATIBILITY.md)
@@ -20,6 +23,16 @@ v0.1 和 v0.2 是内部里程碑，没有正式 Git Release Tag。
 - [规范性产品与文件格式规格](docs/specs/README.md)
 
 `docs/specs/` 下的 `v1.0.1` 是规格修订号，并非软件发布版本号。
+
+## v1.1 核心任务闭环（开发版）
+
+- Windows 桌面端改为 React/TypeScript + WebView2，本地 FastAPI 在 `/ui/` 托管全部静态资源；
+  生产环境不加载远程脚本、字体或图片。
+- 首次使用通过三步资料空间向导完成目录选择、只读预检和异步建立索引，也可直接创建示例资料。
+- 工作台提供本地结果先到、AI 可选后补的分组搜索，固定证据检查器展示路径、锚点、质量和打开动作。
+- 任务包以独立 `1.0` Schema 持久化到 Index，支持 revision 冲突、自动保存、本地草稿、槽位排序、
+  Markdown 导出、Package 确认导出和归档。
+- Local API v1 契约版本保持 `1.0`；新增接口与可选字段不改变原有字段语义，Raw 仍保持只读。
 
 ## v1.0 工程最终版
 
@@ -84,7 +97,7 @@ v0.1 和 v0.2 是内部里程碑，没有正式 Git Release Tag。
 - 将纯文本文件作为独立结果，并依据 Manifest 代次增量刷新缓存。
 - 60 项 `octopus-retrieval-v1` 套件达到 54/60 Hit@5（90.0%）；聚焦的 10 项解释套件达到
   100% Top-5 和 MRR 1.00，且没有契约失败。
-- 搜索 Schema `0.5` 会自动重建旧的可丢弃缓存。
+- 搜索 Schema `0.6` 会自动重建旧的可丢弃缓存，并补充内容标识、修改时间和大小筛选元数据。
 
 ## v0.4 能力
 

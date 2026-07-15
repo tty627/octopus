@@ -17,8 +17,8 @@ from octopus.config import (
     repository_config_path,
     repository_state_path,
 )
+from octopus.desktop_helpers import format_bytes, open_path, result_detail_text, suggest_index_path
 from octopus.engine import UpdateEngine
-from octopus.gui import _open_path, format_bytes, result_detail_text, suggest_index_path
 from octopus.models import ExtractionEvidence, SearchResult, UpdatePhase, UpdateProgress
 from octopus.onboarding import (
     OnboardingErrorCode,
@@ -193,16 +193,18 @@ def test_gui_path_opener_is_platform_safe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened: list[Path] = []
-    monkeypatch.setattr("octopus.gui.sys.platform", "win32")
+    monkeypatch.setattr("octopus.desktop_helpers.sys.platform", "win32")
     monkeypatch.setattr(
-        "octopus.gui.os.startfile", lambda path: opened.append(Path(path)), raising=False
+        "octopus.desktop_helpers.os.startfile",
+        lambda path: opened.append(Path(path)),
+        raising=False,
     )
-    _open_path(tmp_path)
+    open_path(tmp_path)
     assert opened == [tmp_path]
 
-    monkeypatch.setattr("octopus.gui.sys.platform", "linux")
+    monkeypatch.setattr("octopus.desktop_helpers.sys.platform", "linux")
     with pytest.raises(RuntimeError, match="only on Windows"):
-        _open_path(tmp_path)
+        open_path(tmp_path)
 
 
 def test_repository_creation_can_disable_ai_and_rolls_back_local_files(

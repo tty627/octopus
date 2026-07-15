@@ -9,7 +9,7 @@ from docx import Document
 from PIL import Image
 
 from octopus.engine import UpdateEngine
-from octopus.models import GeneratedSearchAnswer, SearchResult
+from octopus.models import GeneratedSearchAnswer, SearchFilters, SearchResult
 from octopus.providers import (
     HeuristicProvider,
     ProviderAuthError,
@@ -279,6 +279,46 @@ def test_field_weighting_prefers_exact_filename_and_cache_auto_migrates(
         connection.commit()
     refreshed = search.search("alpha-project.png")
     assert refreshed[0].name == "alpha-project.png"
+
+
+def test_search_cache_05_rebuilds_to_06_and_filters_metadata(
+    repository: tuple[Path, Path, object],
+) -> None:
+    raw, index, _ = repository
+    nested = raw / "Review"
+    nested.mkdir()
+    source = nested / "decision.txt"
+    source.write_text("Atlas approval decision", encoding="utf-8")
+    UpdateEngine(index).run(force_path="*")
+    search = SearchIndex(index)
+    initial = search.search("Atlas")
+    text_status = next(item.status for item in initial if item.index_type == "text")
+
+    with closing(sqlite3.connect(search.database)) as connection:
+        connection.execute(
+            "UPDATE search_metadata SET value = '0.5' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+
+    filtered = search.search(
+        "Atlas",
+        filters=SearchFilters(
+            index_types=["text"],
+            path_prefix="review",
+            statuses=[text_status],
+            modified_after="2020-01-01T00:00:00+00:00",
+            modified_before="2030-01-01T00:00:00+00:00",
+        ),
+    )
+    assert [item.name for item in filtered] == ["decision.txt"]
+    assert filtered[0].content_id
+    assert filtered[0].modified_at
+    assert filtered[0].size_bytes == source.stat().st_size
+    with closing(sqlite3.connect(search.database)) as connection:
+        value = connection.execute(
+            "SELECT value FROM search_metadata WHERE key = 'schema_version'"
+        ).fetchone()
+    assert value == ("0.6",)
 
 
 def test_full_search_rejects_provider_citations_outside_candidates(

@@ -16,6 +16,7 @@ from .models import (
     GeneratedSearchAnswer,
     SearchCitation,
     SearchDocument,
+    SearchFilters,
     SearchMatchEvidence,
     SearchReport,
     SearchResult,
@@ -37,8 +38,8 @@ LATIN_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
 CITATION_MARKER = re.compile(r"\[S(\d+)\]")
 SQLITE_ID_BATCH_SIZE = 1_000
-SEARCH_SCHEMA_VERSION = "0.5"
-SEARCH_ALGORITHM_VERSION = "octopus-0.5-local-v2-explain"
+SEARCH_SCHEMA_VERSION = "0.6"
+SEARCH_ALGORITHM_VERSION = "octopus-0.6-local-v3-filters"
 SEARCH_REPORT_SCHEMA_VERSION = "1.0"
 SearchField = Literal["name", "path", "summary", "keywords", "evidence", "body"]
 MATCH_FIELD_LOCATORS: dict[SearchField, str] = {
@@ -199,6 +200,9 @@ class SearchIndex:
                     body_excerpt=body[:8_000],
                     status=str(update.get("index_status", "clean")),
                     source_uri=str(metadata.get("file_uri", "")),
+                    content_id=str(source.get("content_id", "")),
+                    modified_at=str(metadata.get("modified_at", "")),
+                    size_bytes=max(0, int(metadata.get("size_bytes", 0) or 0)),
                     evidence=_evidence(card.get("extraction_evidence", [])),
                     quality_flags=list(layer.get("quality_flags", [])),
                     truncated=bool(extraction.get("truncated", False)),
@@ -233,6 +237,9 @@ class SearchIndex:
                 body_excerpt=body[:8_000],
                 status=str(update.get("index_status", "clean")),
                 source_uri=str(metadata.get("folder_uri", "")),
+                content_id=str(update.get("content_snapshot_id", "")),
+                modified_at=str(metadata.get("modified_at", "")),
+                size_bytes=max(0, int(metadata.get("size_bytes", 0) or 0)),
                 evidence=folder_evidence,
                 quality_flags=list(layer.get("quality_flags", [])),
             )
@@ -272,6 +279,9 @@ class SearchIndex:
                     keywords=list(child.get("topic_keywords", [])),
                     status=str(child.get("index_status", "clean")),
                     source_uri=uri,
+                    content_id=str(child.get("content_id", "")),
+                    modified_at=str(child.get("modified_at", "")),
+                    size_bytes=max(0, int(child.get("size_bytes", 0) or 0)),
                     evidence=child_evidence,
                     quality_flags=list(child.get("quality_flags", [])),
                     truncated=bool(child.get("truncated", False)),
@@ -335,6 +345,9 @@ class SearchIndex:
                 body_excerpt TEXT NOT NULL,
                 status TEXT NOT NULL,
                 source_uri TEXT NOT NULL,
+                content_id TEXT NOT NULL,
+                modified_at TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
                 evidence_json TEXT NOT NULL,
                 quality_flags_json TEXT NOT NULL,
                 truncated INTEGER NOT NULL
@@ -362,7 +375,7 @@ class SearchIndex:
     def _upsert_document(cls, connection: sqlite3.Connection, document: SearchDocument) -> None:
         cls._delete_node(connection, document.node_id)
         connection.execute(
-            "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 document.node_id,
                 document.index_type,
@@ -376,6 +389,9 @@ class SearchIndex:
                 document.body_excerpt,
                 document.status,
                 document.source_uri,
+                document.content_id,
+                document.modified_at,
+                document.size_bytes,
                 json.dumps(
                     [item.model_dump(mode="json", exclude_none=True) for item in document.evidence],
                     ensure_ascii=False,
@@ -477,12 +493,47 @@ class SearchIndex:
             body_excerpt=row["body_excerpt"],
             status=row["status"],
             source_uri=row["source_uri"],
+            content_id=row["content_id"],
+            modified_at=row["modified_at"],
+            size_bytes=int(row["size_bytes"]),
             evidence=_evidence(json.loads(row["evidence_json"])),
             quality_flags=json.loads(row["quality_flags_json"]),
             truncated=bool(row["truncated"]),
         )
 
-    def search(self, query: str, limit: int = 20, include_stale: bool = True) -> list[SearchResult]:
+    @staticmethod
+    def _matches_filters(document: SearchDocument, filters: SearchFilters | None) -> bool:
+        if filters is None:
+            return True
+        if filters.index_types and document.index_type not in filters.index_types:
+            return False
+        normalized_prefix = filters.path_prefix.replace("\\", "/").strip("/").casefold()
+        if normalized_prefix and not document.raw_relative_path.casefold().startswith(
+            normalized_prefix
+        ):
+            return False
+        if filters.statuses and document.status not in filters.statuses:
+            return False
+        if filters.quality_flags and not set(filters.quality_flags).intersection(
+            document.quality_flags
+        ):
+            return False
+        if filters.modified_after and (
+            not document.modified_at or document.modified_at < filters.modified_after
+        ):
+            return False
+        return not (
+            filters.modified_before
+            and (not document.modified_at or document.modified_at > filters.modified_before)
+        )
+
+    def search(
+        self,
+        query: str,
+        limit: int = 20,
+        include_stale: bool = True,
+        filters: SearchFilters | None = None,
+    ) -> list[SearchResult]:
         if not self._cache_is_current():
             self.rebuild()
         terms = analyze_terms(query)
@@ -507,6 +558,8 @@ class SearchIndex:
         results: list[SearchResult] = []
         for row in rows:
             document = self._row_document(row)
+            if not self._matches_filters(document, filters):
+                continue
             fields: dict[SearchField, str] = {
                 "name": document.name,
                 "path": document.raw_relative_path,
@@ -610,8 +663,32 @@ class SearchIndex:
             result.rank = rank
         return results[:limit]
 
-    def _expanded_results(self, query: str, limit: int) -> list[SearchResult]:
-        results = self.search(query, limit=limit)
+    def documents_by_ids(self, node_ids: list[str]) -> list[SearchDocument]:
+        if not self._cache_is_current():
+            self.rebuild()
+        values = list(dict.fromkeys(node_ids))
+        if not values:
+            return []
+        documents: list[SearchDocument] = []
+        with closing(self._connect()) as connection:
+            for offset in range(0, len(values), SQLITE_ID_BATCH_SIZE):
+                batch = values[offset : offset + SQLITE_ID_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in batch)
+                rows = connection.execute(
+                    f"SELECT * FROM documents WHERE node_id IN ({placeholders})", batch
+                ).fetchall()
+                documents.extend(self._row_document(row) for row in rows)
+        by_id = {document.node_id: document for document in documents}
+        return [by_id[node_id] for node_id in values if node_id in by_id]
+
+    def _expanded_results(
+        self, query: str, limit: int, filters: SearchFilters | None = None
+    ) -> list[SearchResult]:
+        results = (
+            self.search(query, limit=limit)
+            if filters is None
+            else self.search(query, limit=limit, filters=filters)
+        )
         child_ids: list[str] = []
         for result in results:
             if result.index_type != "foldernode":
@@ -643,6 +720,8 @@ class SearchIndex:
                     )
             for row in rows:
                 document = self._row_document(row)
+                if not self._matches_filters(document, filters):
+                    continue
                 recommended_open_target: Literal["index", "source"] = (
                     "source" if document.index_type == "text" else "index"
                 )
@@ -742,12 +821,13 @@ class SearchIndex:
         query: str,
         limit: int = 20,
         mode: Literal["local", "auto"] = "local",
+        filters: SearchFilters | None = None,
     ) -> SearchReport:
         if mode not in {"local", "auto"}:
             raise ValueError("Search mode must be 'local' or 'auto'")
         started = time.perf_counter()
         candidate_limit = max(limit, self.config.ai_policy.max_search_candidates)
-        local_results = self._expanded_results(query, candidate_limit)
+        local_results = self._expanded_results(query, candidate_limit, filters)
         local_results = local_results[:candidate_limit]
         for rank, result in enumerate(local_results, start=1):
             result.rank = rank

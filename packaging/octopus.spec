@@ -2,15 +2,29 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 root = Path(SPECPATH).parent
-datas = collect_data_files("rapidocr") + collect_data_files("onnxruntime")
+datas = (
+    collect_data_files("rapidocr")
+    + collect_data_files("onnxruntime")
+    + collect_data_files("webview")
+    + [
+        (str(root / "src" / "octopus" / "ui_dist"), "octopus/ui_dist"),
+        (str(root / "plugins" / "package"), "octopus/reference_plugins/package"),
+        (str(root / "plugins" / "timeline"), "octopus/reference_plugins/timeline"),
+        (
+            str(root / "benchmarks" / "datasets" / "search-value-v1.json"),
+            "octopus/data",
+        ),
+    ]
+)
 binaries = collect_dynamic_libs("onnxruntime") + collect_dynamic_libs("pypdfium2")
 hiddenimports = [
     "rapidocr.inference_engine.onnxruntime",
     "rapidocr.inference_engine.onnxruntime.main",
     "rapidocr.inference_engine.onnxruntime.provider_config",
+    *collect_submodules("webview"),
 ]
 
 common = dict(

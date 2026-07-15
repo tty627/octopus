@@ -7,11 +7,14 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any, Protocol, cast
 
+from packaging.version import InvalidVersion, Version
+
 from .api import API_CONTRACT_VERSION
 from .service_control import (
     api_status,
     ensure_service_token,
     start_api_process,
+    stop_api_process,
 )
 
 
@@ -75,7 +78,12 @@ class LocalApiClient:
         self.timeout = timeout
 
     @classmethod
-    def from_runtime(cls, *, start_if_needed: bool = True) -> LocalApiClient:
+    def from_runtime(
+        cls,
+        *,
+        start_if_needed: bool = True,
+        required_product_version: str | None = None,
+    ) -> LocalApiClient:
         status = api_status()
         if not status.get("running") or not status.get("healthy"):
             if not start_if_needed:
@@ -84,6 +92,39 @@ class LocalApiClient:
                 status = start_api_process()
             except (OSError, RuntimeError, ValueError) as error:
                 raise DesktopServiceError("service_unavailable", str(error)) from error
+        client = cls._from_status(status)
+        if required_product_version is None:
+            return client
+        actual_version = str(client.contract().get("product_version", ""))
+        if actual_version == required_product_version:
+            return client
+        try:
+            if actual_version and Version(actual_version) > Version(required_product_version):
+                raise DesktopServiceError(
+                    "service_version_mismatch",
+                    f"Local API {actual_version} is newer than desktop {required_product_version}",
+                )
+        except InvalidVersion as error:
+            raise DesktopServiceError(
+                "service_version_mismatch",
+                f"Local API reported an invalid product version: {actual_version or 'missing'}",
+            ) from error
+        try:
+            stop_api_process()
+            status = start_api_process()
+        except (OSError, RuntimeError, ValueError) as error:
+            raise DesktopServiceError("service_upgrade_failed", str(error)) from error
+        client = cls._from_status(status)
+        restarted_version = str(client.contract().get("product_version", ""))
+        if restarted_version != required_product_version:
+            raise DesktopServiceError(
+                "service_version_mismatch",
+                f"Desktop requires Local API {required_product_version}, found {restarted_version}",
+            )
+        return client
+
+    @classmethod
+    def _from_status(cls, status: dict[str, Any]) -> LocalApiClient:
         host = str(status.get("host", "127.0.0.1"))
         port = int(status.get("port", 8765))
         url_host = f"[{host}]" if ":" in host else host

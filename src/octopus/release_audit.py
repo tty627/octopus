@@ -87,10 +87,12 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
     checks: list[ReleaseCheck] = []
     parsed = Version(expected_version)
     _check(checks, "product_version", __version__ == expected_version, __version__)
-    release_version = (parsed.pre is not None and parsed.pre[0] == "rc") or (
-        parsed.pre is None and parsed.dev is None and parsed.local is None
+    auditable_version = parsed.local is None and (
+        parsed.dev is not None
+        or (parsed.pre is not None and parsed.pre[0] == "rc")
+        or parsed.pre is None
     )
-    _check(checks, "release_version", release_version, expected_version)
+    _check(checks, "release_version", auditable_version, expected_version)
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     _check(
         checks,
@@ -110,11 +112,12 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         r'^#define AppNumericVersion "([^"]+)"$', installer, re.MULTILINE
     )
     release = parsed.release + (0,) * (3 - len(parsed.release))
-    stage = (
-        65_535
-        if parsed.pre is None
-        else {"a": 1_000, "b": 2_000, "rc": 3_000}[parsed.pre[0]] + parsed.pre[1]
-    )
+    if parsed.dev is not None:
+        stage = parsed.dev
+    elif parsed.pre is not None:
+        stage = {"a": 1_000, "b": 2_000, "rc": 3_000}[parsed.pre[0]] + parsed.pre[1]
+    else:
+        stage = 65_535
     expected_numeric = ".".join(str(item) for item in (*release[:3], stage))
     _check(
         checks,
@@ -127,6 +130,7 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         f"active candidate is `{expected_version}`" in readme
         or f"engineering-final candidate is `{expected_version}`" in readme
         or f"工程最终候选版本为 `{expected_version}`" in readme
+        or f"当前开发版本为 `{expected_version}`" in readme
     )
     _check(
         checks,
@@ -145,7 +149,13 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
         frozen_contracts == runtime_contracts(),
         "runtime contracts match contract-freeze-v1.json",
     )
-    issues_name = "v1.0-known-issues.json" if parsed.major >= 1 else "v0.9-known-issues.json"
+    issues_name = (
+        "v1.1-known-issues.json"
+        if parsed.release >= (1, 1)
+        else "v1.0-known-issues.json"
+        if parsed.major >= 1
+        else "v0.9-known-issues.json"
+    )
     issues_payload = json.loads(
         (root / "docs" / "releases" / issues_name).read_text(encoding="utf-8")
     )

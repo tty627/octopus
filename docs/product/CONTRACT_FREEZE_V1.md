@@ -7,7 +7,7 @@
 - 全局配置、Repository Config/State 与 Markdown Index Schema 均为 `0.2`。
 - Local API 为 `1.0`；v1 内只能新增端点和可选字段。
 - Plugin API 为 `1.0`，四项权限名和宿主代理语义冻结；Python Worker 仍不是恶意代码 OS 沙箱。
-- Search Report 为 `1.0`；SQLite 搜索缓存 `0.5` 可删除重建，不属于不可逆持久化承诺。
+- Search Report 为 `1.0`；SQLite 搜索缓存 `0.6` 可删除重建，不属于不可逆持久化承诺。
 - 诊断包为 `1.0`，继续禁止路径、内容、查询、消息和凭据进入包体。
 
 ## 变更规则

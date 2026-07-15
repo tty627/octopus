@@ -306,7 +306,10 @@ class UpdateEngine:
             else self.config.repository.repository_name,
             "relative_name_or_path": child.raw_relative_path,
             "index_status": child.state.value,
+            "content_id": child.fingerprint.content_hash
+            or (sha256_file(source) if source.is_file() else ""),
             "size_bytes": child.fingerprint.size_bytes,
+            "modified_at": child.fingerprint.modified_at,
             "quality_flags": [],
             "source_link_available": source.exists(),
             "source_uri": source.resolve().as_uri() if source.exists() else "",
