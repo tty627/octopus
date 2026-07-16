@@ -26,6 +26,14 @@ SEARCH_COMPOSE_PROMPT = (
     "contain supplied node IDs. Never claim to have opened original non-text files."
 )
 
+RESEARCH_TASK_PROMPT = (
+    "Create a grounded Chinese research task proposal from the supplied local evidence candidates. "
+    "Return JSON with title, summary, warnings, gaps, and slots. Each slot must contain name, "
+    "description, required, and candidate_ids. Candidate_ids must only use supplied IDs; never "
+    "invent files, pages, quotations, authors, dates, or facts. Keep the proposal useful for "
+    "study/research and prefer precise evidence over broad coverage."
+)
+
 JSON_REPAIR_PROMPT = (
     "Repair the supplied invalid JSON. Return only a valid JSON object; do not add facts."
 )

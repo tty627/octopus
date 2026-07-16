@@ -46,7 +46,12 @@ from .providers import (
 from .sample_data import default_sample_paths, materialize_sample_repository
 from .search import SearchIndex
 from .service_control import ensure_service_token
-from .service_runtime import JobManager, RepositoryScheduler
+from .service_runtime import (
+    JobManager,
+    RepositoryScheduler,
+    WorkspaceChangeMonitor,
+    WorkspaceScheduler,
+)
 from .task_packs import (
     TaskPackConflictError,
     TaskPackError,
@@ -250,12 +255,18 @@ def create_app(
     global_service = load_global_config().service
     jobs = job_manager or JobManager(global_service.max_background_workers)
     scheduler = RepositoryScheduler(jobs)
+    workspace_scheduler = WorkspaceScheduler(jobs)
+    workspace_monitor = WorkspaceChangeMonitor(workspace_scheduler.request_sync)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         if start_scheduler and global_service.scheduler_enabled:
             scheduler.start()
+            workspace_scheduler.start()
+            workspace_monitor.start()
         yield
+        workspace_monitor.stop()
+        workspace_scheduler.stop()
         scheduler.stop()
         jobs.shutdown(wait=True)
 

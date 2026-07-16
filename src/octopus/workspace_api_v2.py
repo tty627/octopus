@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__
+from .citations import DEFAULT_CITATION_STYLE, normalize_citation_style
 from .config import global_config_lock, load_global_config, save_global_config
 from .credentials import (
     CredentialStoreError,
@@ -27,8 +28,17 @@ from .providers import (
     ProviderTransientError,
     test_ai_connection,
 )
+from .research_ai import (
+    ResearchTaskProposal,
+    ai_index_status,
+    confirm_research_proposal,
+    create_research_proposal,
+    run_ai_index,
+)
+from .research_export import export_research_bundle
 from .service_runtime import JobManager
 from .workspace_tasks_v2 import (
+    TaskTemplateId,
     WorkspaceTask,
     WorkspaceTaskConflictError,
     WorkspaceTaskError,
@@ -36,6 +46,7 @@ from .workspace_tasks_v2 import (
     WorkspaceTaskVersionError,
     archive_task,
     create_task,
+    list_task_templates,
     list_tasks,
     load_task,
     migrate_legacy_tasks,
@@ -52,24 +63,36 @@ from .workspace_v2 import (
 V2_CONTRACT_VERSION = "2.0"
 
 
-class WorkspaceCreateRequest(BaseModel):
+class StrictRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class WorkspaceCreateRequest(StrictRequestModel):
     raw_path: Path
     name: str | None = Field(default=None, max_length=200)
 
 
-class WorkspaceSearchRequest(BaseModel):
+class WorkspaceSearchRequest(StrictRequestModel):
     query: str = Field(min_length=1, max_length=2_000)
     mode: Literal["local", "assisted"] = "local"
     limit: int = Field(default=30, ge=1, le=100)
     path_prefix: str = Field(default="", max_length=2_000)
     extensions: list[str] = Field(default_factory=list, max_length=100)
+    readability: list[Literal["readable", "partial", "low"]] = Field(default_factory=list)
+    indexing_states: list[Literal["indexed", "metadata_only", "failed"]] = Field(
+        default_factory=list
+    )
+    source_kinds: list[str] = Field(default_factory=list, max_length=10)
+    modified_from: str = ""
+    modified_to: str = ""
+    task_id: str = ""
 
 
-class WorkspaceVisionRequest(BaseModel):
+class WorkspaceVisionRequest(StrictRequestModel):
     vision_enabled: bool
 
 
-class WorkspaceAISettingsRequest(BaseModel):
+class WorkspaceAISettingsRequest(StrictRequestModel):
     enabled: bool = False
     provider: Literal["deepseek", "openai_compatible"] = "deepseek"
     base_url: str = Field(min_length=8, max_length=2_048)
@@ -89,6 +112,12 @@ class WorkspaceAISettingsRequest(BaseModel):
             or parsed.password
         ):
             raise ValueError("AI base URL must be an HTTP(S) URL without credentials")
+        if parsed.scheme == "http" and parsed.hostname.casefold() not in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
+            raise ValueError("Remote AI base URLs must use HTTPS")
         return normalized
 
     @field_validator("model")
@@ -106,18 +135,47 @@ class WorkspaceAISettingsRequest(BaseModel):
         return normalized or None
 
 
-class WorkspaceTaskCreateRequest(BaseModel):
+class WorkspaceTaskCreateRequest(StrictRequestModel):
     title: str = Field(min_length=1, max_length=200)
     goal: str = Field(default="", max_length=2_000)
+    template_id: TaskTemplateId = "free_research"
 
 
-class WorkspaceTaskUpdateRequest(BaseModel):
+class WorkspaceTaskUpdateRequest(StrictRequestModel):
     expected_revision: int = Field(ge=1)
     task: WorkspaceTask
 
 
-class WorkspaceTaskArchiveRequest(BaseModel):
+class WorkspaceTaskArchiveRequest(StrictRequestModel):
     expected_revision: int = Field(ge=1)
+
+
+class WorkspaceTaskRevalidateRequest(StrictRequestModel):
+    expected_revision: int = Field(ge=1)
+
+
+class WorkspaceTaskExportRequest(StrictRequestModel):
+    citation_style: str = DEFAULT_CITATION_STYLE
+    include_sources: bool = False
+
+    @field_validator("citation_style")
+    @classmethod
+    def validate_citation_style(cls, value: str) -> str:
+        return normalize_citation_style(value)
+
+
+class AIIndexRequest(StrictRequestModel):
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class ResearchProposalRequest(StrictRequestModel):
+    goal: str = Field(min_length=1, max_length=2_000)
+    title: str = Field(default="", max_length=200)
+    template_id: TaskTemplateId = "free_research"
+
+
+class ResearchProposalConfirmRequest(StrictRequestModel):
+    proposal: ResearchTaskProposal
 
 
 def _workspace_store(workspace_id: str) -> WorkspaceStore:
@@ -216,13 +274,21 @@ def register_workspace_routes(
                 "workspace_create",
                 "hidden_sqlite_index",
                 "pdfium_ocr_pipeline",
+                "office_image_extraction",
+                "archive_member_search",
                 "document_evidence_search",
                 "authenticated_page_preview",
+                "authenticated_open_target",
                 "workspace_health",
                 "document_reprocess",
                 "evidence_tasks",
+                "research_task_templates",
+                "research_bundle_export",
+                "ai_document_and_folder_cards",
+                "ai_research_task_proposals",
                 "v1_task_migration",
                 "explicit_vision_authorization",
+                "persistent_cancelable_jobs",
             ],
         }
 
@@ -244,6 +310,7 @@ def register_workspace_routes(
             workspace = create_workspace(request.raw_path, request.name)
         except (OSError, ValueError) as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+
         def execute(progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
             result = WorkspaceStore(workspace).sync(progress)
             result["task_migration"] = migrate_legacy_tasks(workspace)
@@ -269,6 +336,7 @@ def register_workspace_routes(
     )
     def workspace_sync(workspace_id: str) -> ServiceJob:
         store = _workspace_store(workspace_id)
+
         def execute(progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
             result = store.sync(progress)
             result["task_migration"] = migrate_legacy_tasks(store.workspace)
@@ -291,16 +359,46 @@ def register_workspace_routes(
                 mode=request.mode,
                 path_prefix=request.path_prefix,
                 extensions=request.extensions,
+                readability=request.readability,
+                indexing_states=request.indexing_states,
+                source_kinds=request.source_kinds,
+                modified_from=request.modified_from,
+                modified_to=request.modified_to,
+                task_id=request.task_id,
             )
         except ValueError as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
         return report.model_dump(mode="json")
 
+    @app.get("/v2/workspaces/{workspace_id}/ai-index", dependencies=authenticated)
+    def workspace_ai_index_status(workspace_id: str) -> dict[str, Any]:
+        _workspace_store(workspace_id)
+        return ai_index_status(workspace_id).model_dump(mode="json")
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/ai-index",
+        response_model=ServiceJob,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=authenticated,
+    )
+    def workspace_ai_index(
+        workspace_id: str,
+        request: AIIndexRequest,
+    ) -> ServiceJob:
+        _workspace_store(workspace_id)
+        job = jobs.submit_unique_with_progress(
+            workspace_id,
+            "workspace_ai_index",
+            lambda progress: run_ai_index(workspace_id, request.limit, progress),
+        )
+        if job is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "AI 索引任务已经在运行。")
+        return job
+
     @app.get("/v2/workspaces/{workspace_id}/documents", dependencies=authenticated)
     def workspace_documents(workspace_id: str) -> list[dict[str, Any]]:
         return [
-            item.model_dump(mode="json")
-            for item in _workspace_store(workspace_id).list_documents()
+            item.model_dump(mode="json") for item in _workspace_store(workspace_id).list_documents()
         ]
 
     @app.get(
@@ -313,6 +411,51 @@ def register_workspace_routes(
         except FileNotFoundError as error:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
         return document.model_dump(mode="json")
+
+    @app.get(
+        "/v2/workspaces/{workspace_id}/documents/{document_id}/members",
+        dependencies=authenticated,
+    )
+    def workspace_document_members(
+        workspace_id: str,
+        document_id: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            return [
+                item.model_dump(mode="json")
+                for item in _workspace_store(workspace_id).list_members(document_id)
+            ]
+        except FileNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+
+    @app.get(
+        "/v2/workspaces/{workspace_id}/documents/{document_id}/content",
+        response_class=FileResponse,
+        dependencies=authenticated,
+    )
+    def workspace_document_content(workspace_id: str, document_id: str) -> FileResponse:
+        try:
+            path = _workspace_store(workspace_id).content_path(document_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except (PermissionError, ValueError) as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        return FileResponse(path, filename=path.name)
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/documents/{document_id}/open-target",
+        dependencies=authenticated,
+    )
+    def workspace_document_open_target(
+        workspace_id: str,
+        document_id: str,
+    ) -> dict[str, Any]:
+        try:
+            return _workspace_store(workspace_id).open_target(document_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except (PermissionError, ValueError) as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
 
     @app.post(
         "/v2/workspaces/{workspace_id}/documents/{document_id}/reprocess",
@@ -436,9 +579,9 @@ def register_workspace_routes(
     ) -> dict[str, Any]:
         candidate = _ai_candidate(workspace_id, request)
         try:
-            credential = request.api_key or resolve_ai_api_key(
-                workspace_id, request.provider
-            ).api_key
+            credential = (
+                request.api_key or resolve_ai_api_key(workspace_id, request.provider).api_key
+            )
             if not credential:
                 return {"ok": False, "code": "key_not_configured", "message": "请先填写 API Key。"}
             test_ai_connection(candidate, credential)
@@ -475,7 +618,50 @@ def register_workspace_routes(
         request: WorkspaceTaskCreateRequest,
     ) -> dict[str, Any]:
         _workspace_store(workspace_id)
-        return create_task(workspace_id, request.title, request.goal).model_dump(mode="json")
+        return create_task(
+            workspace_id, request.title, request.goal, request.template_id
+        ).model_dump(mode="json")
+
+    @app.get("/v2/task-templates", dependencies=authenticated)
+    def workspace_task_templates() -> list[dict[str, Any]]:
+        return list_task_templates()
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/task-proposals",
+        dependencies=authenticated,
+    )
+    def workspace_task_proposal(
+        workspace_id: str,
+        request: ResearchProposalRequest,
+    ) -> dict[str, Any]:
+        _workspace_store(workspace_id)
+        try:
+            proposal = create_research_proposal(
+                workspace_id,
+                request.goal,
+                request.title,
+                request.template_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
+        return proposal.model_dump(mode="json")
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/task-proposals/confirm",
+        dependencies=authenticated,
+    )
+    def workspace_task_proposal_confirm(
+        workspace_id: str,
+        request: ResearchProposalConfirmRequest,
+    ) -> dict[str, Any]:
+        _workspace_store(workspace_id)
+        try:
+            task = confirm_research_proposal(workspace_id, request.proposal)
+        except ValueError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        return task.model_dump(mode="json")
 
     @app.get(
         "/v2/workspaces/{workspace_id}/tasks/{task_id}",
@@ -538,6 +724,61 @@ def register_workspace_routes(
         except WorkspaceTaskError as error:
             raise _handle_task_error(error) from error
 
+    @app.post(
+        "/v2/workspaces/{workspace_id}/tasks/{task_id}/revalidate",
+        dependencies=authenticated,
+    )
+    def workspace_task_revalidate(
+        workspace_id: str,
+        task_id: str,
+        request: WorkspaceTaskRevalidateRequest,
+    ) -> dict[str, Any]:
+        _workspace_store(workspace_id)
+        try:
+            current = load_task(workspace_id, task_id)
+            task = save_task(workspace_id, task_id, request.expected_revision, current)
+        except WorkspaceTaskError as error:
+            raise _handle_task_error(error) from error
+        return task.model_dump(mode="json")
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/tasks/{task_id}/export",
+        response_class=FileResponse,
+        dependencies=authenticated,
+    )
+    def workspace_task_export(
+        workspace_id: str,
+        task_id: str,
+        request: WorkspaceTaskExportRequest,
+    ) -> FileResponse:
+        _workspace_store(workspace_id)
+        try:
+            task = load_task(workspace_id, task_id)
+            output = export_research_bundle(
+                task,
+                citation_style=normalize_citation_style(request.citation_style),
+                include_sources=request.include_sources,
+            )
+        except WorkspaceTaskError as error:
+            raise _handle_task_error(error) from error
+        except (OSError, ValueError, FileNotFoundError) as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        return FileResponse(output, media_type="application/zip", filename=output.name)
+
+    @app.get("/v2/workspaces/{workspace_id}/changes", dependencies=authenticated)
+    def workspace_changes(
+        workspace_id: str,
+        limit: int = Query(default=100, ge=1, le=1_000),
+        since: str = Query(default="", max_length=64),
+        include_acknowledged: bool = Query(default=False),
+    ) -> list[dict[str, Any]]:
+        store = _workspace_store(workspace_id)
+        return store.list_changes(
+            limit=limit,
+            since=since,
+            include_acknowledged=include_acknowledged,
+        )
+
     @app.get("/v2/jobs", dependencies=authenticated)
     def workspace_jobs(workspace_id: str | None = None) -> list[dict[str, Any]]:
         return [item.model_dump(mode="json") for item in jobs.list(workspace_id)]
@@ -545,6 +786,13 @@ def register_workspace_routes(
     @app.get("/v2/jobs/{job_id}", dependencies=authenticated)
     def workspace_job(job_id: str) -> dict[str, Any]:
         job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+        return job.model_dump(mode="json")
+
+    @app.post("/v2/jobs/{job_id}/cancel", dependencies=authenticated)
+    def workspace_job_cancel(job_id: str) -> dict[str, Any]:
+        job = jobs.cancel(job_id)
         if job is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
         return job.model_dump(mode="json")

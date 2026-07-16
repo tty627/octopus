@@ -2,20 +2,25 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  Archive,
   Check,
+  CheckSquare2,
   FileText,
   Filter,
   LoaderCircle,
   Plus,
   Search,
+  Square,
   SlidersHorizontal,
   Sparkles,
   X,
 } from "lucide-react";
 import { ApiError, api } from "../api";
+import { recentActivity } from "../activity";
 import { EMPTY_FILTERS, useAppStore } from "../store";
-import type { SearchReportV2, SearchResultV2, WorkspaceEvidence } from "../types";
+import type { SearchReportV2, SearchResultV2, SourceKind, WorkspaceEvidence } from "../types";
 import { documentQualityLabel, formatBytes, searchEvidenceText } from "../utils";
+import { locatorLabel, sourceKindLabel } from "./researchLabels";
 
 interface SearchWorkspaceProps {
   addResult: (
@@ -31,8 +36,16 @@ interface SearchWorkspaceProps {
 
 const extensionOptions = [
   { label: "PDF", values: [".pdf"] },
+  { label: "Office", values: [".docx", ".xlsx", ".xlsm", ".pptx"] },
+  { label: "图片", values: [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"] },
+  { label: "ZIP", values: [".zip"] },
   { label: "文本", values: [".txt", ".md", ".rst"] },
-  { label: "Office", values: [".docx", ".xlsx", ".pptx"] },
+];
+
+const sourceKindOptions: Array<{ label: string; value: SourceKind }> = [
+  { label: "普通文件", value: "physical" },
+  { label: "压缩包", value: "archive" },
+  { label: "ZIP 内文件", value: "archive_member" },
 ];
 
 export function SearchWorkspace({
@@ -57,6 +70,7 @@ export function SearchWorkspace({
   const [stage, setStage] = useState<"idle" | "searching" | "ready" | "degraded">("idle");
   const [filterOpen, setFilterOpen] = useState(false);
   const [error, setError] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const sequence = useRef(0);
   const controller = useRef<AbortController | null>(null);
   const aiSettings = useQuery({
@@ -78,6 +92,7 @@ export function SearchWorkspace({
     setStage("idle");
     setError("");
     setFilterOpen(false);
+    setSelectedIds(new Set());
     setSubmittedQuery("");
     setFilters(EMPTY_FILTERS);
     clearActionError();
@@ -111,8 +126,10 @@ export function SearchWorkspace({
         useAppStore.getState().workspaceId !== requestedWorkspaceId
       ) return;
       setReport(result);
+      setSelectedIds(new Set());
       setReportWorkspaceId(requestedWorkspaceId);
       setSubmittedQuery(result.query);
+      recentActivity.recordSearch(result.query);
       setStage(result.actual_mode === "degraded" ? "degraded" : "ready");
       inspect(result.results[0] ?? null);
     } catch (reason) {
@@ -131,6 +148,36 @@ export function SearchWorkspace({
         ? filters.extensions.filter((value) => !values.includes(value))
         : [...new Set([...filters.extensions, ...values])],
     });
+  };
+
+  const toggleSourceKind = (value: SourceKind) => {
+    const currentKinds = filters.source_kinds ?? [];
+    setFilters({
+      ...filters,
+      source_kinds: currentKinds.includes(value)
+        ? currentKinds.filter((item) => item !== value)
+        : [...currentKinds, value],
+    });
+  };
+
+  const visibleResults = reportWorkspaceId === workspaceId ? report?.results ?? [] : [];
+  const selectedResults = visibleResults.filter((result) => selectedIds.has(result.document_id));
+  const toggleResult = (documentId: string) => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (next.has(documentId)) next.delete(documentId);
+    else next.add(documentId);
+    return next;
+  });
+  const toggleAll = () => setSelectedIds(
+    selectedResults.length === visibleResults.length && visibleResults.length > 0
+      ? new Set()
+      : new Set(visibleResults.map((result) => result.document_id)),
+  );
+  const addSelected = async () => {
+    for (const result of selectedResults) {
+      await addResult(result, result.best_evidence, report?.query || "研究资料包", workspaceId);
+    }
+    setSelectedIds(new Set());
   };
 
   return (
@@ -177,8 +224,20 @@ export function SearchWorkspace({
         <button className={`filterButton ${filterOpen ? "filterActive" : ""}`} onClick={() => setFilterOpen((value) => !value)}>
           <SlidersHorizontal size={16} />筛选
         </button>
-        {(filters.path_prefix || filters.extensions.length > 0) && (
+        {(filters.path_prefix || filters.extensions.length > 0 || (filters.source_kinds?.length ?? 0) > 0) && (
           <button className="textButton smallButton" onClick={() => setFilters(EMPTY_FILTERS)}>清除</button>
+        )}
+        {visibleResults.length > 0 && (
+          <div className="bulkSearchActions">
+            <button className="textButton smallButton" onClick={toggleAll}>
+              {selectedResults.length === visibleResults.length ? <CheckSquare2 size={15} /> : <Square size={15} />}
+              {selectedResults.length === visibleResults.length ? "取消全选" : "全选"}
+            </button>
+            <button className="secondaryButton smallButton" disabled={selectedResults.length === 0 || adding} onClick={() => void addSelected()}>
+              {adding ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />}
+              加入资料包{selectedResults.length > 0 ? ` (${selectedResults.length})` : ""}
+            </button>
+          </div>
         )}
         <span className="searchStatus" aria-live="polite">
           {stage === "searching" && "正在检索本地资料…"}
@@ -201,6 +260,15 @@ export function SearchWorkspace({
           <label>
             <span>文件夹范围</span>
             <input value={filters.path_prefix} onChange={(event) => setFilters({ ...filters, path_prefix: event.target.value })} placeholder="例如：第六章/" />
+          </label>
+          <label className="wideFilter">
+            <span><Archive size={15} />来源位置</span>
+            <span className="filterChoices">
+              {sourceKindOptions.map((option) => {
+                const active = filters.source_kinds?.includes(option.value) ?? false;
+                return <button key={option.value} className={active ? "choiceActive" : ""} onClick={() => toggleSourceKind(option.value)}>{active && <Check size={14} />}{option.label}</button>;
+              })}
+            </span>
           </label>
         </div>
       )}
@@ -249,12 +317,14 @@ export function SearchWorkspace({
                 key={result.document_id}
                 result={result}
                 focused={inspector?.document_id === result.document_id}
+                checked={selectedIds.has(result.document_id)}
                 inTask={Boolean(activeTask?.items.some((item) =>
                   item.document_id === result.document_id &&
                   item.page_number === result.best_evidence.page_number &&
                   item.excerpt === result.best_evidence.excerpt
                 ))}
                 onInspect={() => inspect(result)}
+                onToggle={() => toggleResult(result.document_id)}
                 adding={adding}
                 onAdd={() => void addResult(result, result.best_evidence, report.query || "资料核对任务", workspaceId)}
               />
@@ -269,16 +339,20 @@ export function SearchWorkspace({
 function ResultRow({
   result,
   focused,
+  checked,
   inTask,
   adding,
   onInspect,
+  onToggle,
   onAdd,
 }: {
   result: SearchResultV2;
   focused: boolean;
+  checked: boolean;
   inTask: boolean;
   adding: boolean;
   onInspect: () => void;
+  onToggle: () => void;
   onAdd: () => void;
 }) {
   const evidence = result.best_evidence;
@@ -290,6 +364,9 @@ function ResultRow({
   const lowQualityExcerpt = result.indexing_state === "indexed" && result.readability === "low";
   return (
     <article className={`resultRow ${focused ? "resultFocused" : ""}`} onClick={onInspect}>
+      <label className="resultSelect" onClick={(event) => event.stopPropagation()}>
+        <input type="checkbox" checked={checked} onChange={onToggle} aria-label={`选择 ${result.name}`} />
+      </label>
       <button className="resultBody" onClick={onInspect} onFocus={onInspect} aria-label={result.name}>
         <span className="resultTitle">
           <strong>{result.name}</strong>
@@ -297,7 +374,7 @@ function ResultRow({
         </span>
         <span className="resultReason">
           {evidence.reason}
-          {evidence.page_number ? ` · 第 ${evidence.page_number} 页` : ""}
+          {locatorLabel(evidence.locator ?? result.locator, evidence.page_number) ? ` · ${locatorLabel(evidence.locator ?? result.locator, evidence.page_number)}` : ""}
           {evidence.heading ? ` · ${evidence.heading}` : ""}
         </span>
         <span className={lowQualityExcerpt ? "resultExcerpt lowExcerpt" : "resultExcerpt"}>
@@ -308,14 +385,23 @@ function ResultRow({
         )}
       </button>
       <div className="resultMeta">
+        <span className="sourceBadge">{sourceKindLabel(result)}</span>
+        <span className="formatBadge">{formatLabel(result.extension)}</span>
         <span className={`qualityBadge quality-${qualityState}`}>
           {documentQualityLabel(result.indexing_state, result.readability)}
         </span>
         <span>{formatBytes(result.size_bytes)}</span>
       </div>
-      <button className="iconButton resultAdd" disabled={inTask || adding} onClick={(event) => { event.stopPropagation(); onAdd(); }} aria-label={inTask ? `${result.name} 已加入任务` : `将 ${result.name} 加入任务`} title={inTask ? "已加入" : adding ? "正在加入" : "加入任务"}>
+      <button className="iconButton resultAdd" disabled={inTask || adding} onClick={(event) => { event.stopPropagation(); onAdd(); }} aria-label={inTask ? `${result.name} 已加入资料包` : `将 ${result.name} 加入资料包`} title={inTask ? "已加入" : adding ? "正在加入" : "加入资料包"}>
         {inTask ? <Check size={17} /> : adding ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}
       </button>
     </article>
   );
+}
+
+function formatLabel(extension: string): string {
+  if ([".docx", ".xlsx", ".xlsm", ".pptx"].includes(extension)) return "Office 正文";
+  if ([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"].includes(extension)) return "图片 OCR";
+  if (extension === ".zip") return "ZIP";
+  return extension.replace(".", "").toUpperCase() || "文件";
 }

@@ -8,6 +8,11 @@ import type {
   WorkspaceDocument,
   WorkspaceTask,
   WorkspaceTaskSummary,
+  AIIndexStatus,
+  ResearchPackExportRequest,
+  ResearchTaskProposal,
+  TaskTemplateId,
+  WorkspaceChange,
 } from "./types";
 
 const now = new Date().toISOString();
@@ -20,11 +25,11 @@ const workspace: Workspace = {
   vision_enabled: false,
   legacy_index_present: true,
   health: {
-    document_count: 12,
-    readable_count: 9,
+    document_count: 17,
+    readable_count: 13,
     partial_count: 2,
     low_quality_count: 1,
-    metadata_only_count: 0,
+    metadata_only_count: 1,
     failed_count: 0,
     last_sync_at: now,
   },
@@ -57,6 +62,15 @@ const result = (
   readability_score: 0.93,
   indexing_state: "indexed",
   source_uri: `file:///C:/Users/Demo/Documents/${encodeURIComponent(relativePath)}`,
+  source_ref: {
+    kind: "physical",
+    workspace_path: relativePath,
+    virtual_path: relativePath,
+    stable_id: `source-${rank}`,
+  },
+  parser_key: name.endsWith(".pdf") ? "pdf" : "text",
+  parser_version: "2.1",
+  freshness_status: "current",
   overview: excerpt,
   best_evidence: evidence(page, page ? "正文包含查询内容" : "文件名包含查询内容", excerpt),
   additional_evidence: [],
@@ -98,6 +112,51 @@ const allResults: SearchResultV2[] = [
       best_evidence: evidence(8, "文件名包含查询内容", "正文识别质量较低，可按文件名查找。", 0.31),
     },
   ),
+  result(5, "研究方法综述.docx", "文献/研究方法综述.docx", "本研究采用混合研究方法，并从样本、变量和数据来源三个方面说明设计。", null, {
+    parser_key: "docx",
+    best_evidence: { ...evidence(null, "段落包含查询内容", "本研究采用混合研究方法，并从样本、变量和数据来源三个方面说明设计。"), locator: { kind: "paragraph", paragraph_index: 6 } },
+  }),
+  result(6, "实验数据.xlsx", "数据/实验数据.xlsx", "实验组与对照组的均值、标准差和样本数量。", null, {
+    parser_key: "xlsx",
+    best_evidence: { ...evidence(null, "工作表包含查询内容", "实验组与对照组的均值、标准差和样本数量。"), locator: { kind: "sheet", sheet_name: "结果", cell_range: "A1:F18" } },
+  }),
+  result(7, "课堂汇报.pptx", "汇报/课堂汇报.pptx", "研究结论、局限与后续工作。", null, {
+    parser_key: "pptx",
+    best_evidence: { ...evidence(null, "幻灯片包含查询内容", "研究结论、局限与后续工作。"), locator: { kind: "slide", slide_number: 12 } },
+  }),
+  result(8, "访谈编码表.png", "图像/访谈编码表.png", "访谈主题包括学习投入、反馈频率和协作体验。", null, {
+    parser_key: "image_ocr",
+    best_evidence: { ...evidence(null, "图片 OCR 包含查询内容", "访谈主题包括学习投入、反馈频率和协作体验。"), locator: { kind: "image", label: "整张图片" } },
+  }),
+  result(9, "归档论文.pdf", "课程材料.zip!/论文/归档论文.pdf", "归档论文讨论了证据可追溯性和研究资料复用。", 7, {
+    source_uri: "octopus://archive-member/document-9",
+    source_ref: {
+      kind: "archive_member",
+      workspace_path: "课程材料.zip",
+      virtual_path: "课程材料.zip!/论文/归档论文.pdf",
+      container_path: "课程材料.zip",
+      member_path: "论文/归档论文.pdf",
+      member_chain: ["论文/归档论文.pdf"],
+      member_indexes: [4],
+      archive_depth: 1,
+      stable_id: "archive-member-9",
+    },
+    parser_key: "pdf",
+    best_evidence: { ...evidence(7, "ZIP 内 PDF 正文包含查询内容", "归档论文讨论了证据可追溯性和研究资料复用。"), locator: { kind: "page", page_number: 7 } },
+  }),
+  result(10, "课程材料.zip", "课程材料.zip", "压缩包包含课程论文、数据表和课堂汇报。", null, {
+    indexing_state: "metadata_only",
+    readability: "low",
+    readability_score: 0,
+    source_uri: "file:///C:/Users/Demo/Documents/课程材料.zip",
+    source_ref: {
+      kind: "archive",
+      workspace_path: "课程材料.zip",
+      virtual_path: "课程材料.zip",
+      stable_id: "archive-10",
+    },
+    best_evidence: evidence(null, "压缩包名称包含查询内容", "课程材料.zip"),
+  }),
 ];
 
 const documents: WorkspaceDocument[] = allResults.map((item) => ({
@@ -116,6 +175,12 @@ const documents: WorkspaceDocument[] = allResults.map((item) => ({
   indexing_state: item.indexing_state,
   error: "",
   source_uri: item.source_uri,
+  source_ref: item.source_ref,
+  locator: item.locator,
+  quality_flags: item.quality_flags,
+  parser_key: item.parser_key,
+  parser_version: item.parser_version,
+  freshness_status: item.freshness_status,
 }));
 
 let aiSettings: AISettingsV2 = {
@@ -133,24 +198,42 @@ let aiSettings: AISettingsV2 = {
 let tasks: WorkspaceTask[] = [];
 const serviceJobs: ServiceJob[] = [];
 
-function createTask(title: string, goal: string): WorkspaceTask {
+let aiIndex: AIIndexStatus = {
+  workspace_id: workspace.workspace_id,
+  document_count: documents.length,
+  indexed_document_count: 0,
+  pending_document_count: documents.length,
+  failed_document_count: 0,
+  folder_count: 2,
+  indexed_folder_count: 0,
+  pending_folder_count: 2,
+  failed_folder_count: 0,
+  estimated_calls: documents.length + 2,
+  last_run_at: "",
+  last_error: "",
+};
+
+function createTask(title: string, goal: string, templateId: TaskTemplateId = "free_research"): WorkspaceTask {
+  const slotNames = templateId === "literature_review"
+    ? ["研究背景", "核心文献", "方法与数据", "主要结论", "相反证据", "研究缺口"]
+    : templateId === "course_report"
+      ? ["核心论点", "课程材料", "分析证据", "参考资料"]
+      : ["核心证据", "补充证据", "待核验"];
   const task: WorkspaceTask = {
-    schema_version: "2.0",
+    schema_version: "2.1",
     task_id: crypto.randomUUID(),
     workspace_id: workspace.workspace_id,
     revision: 1,
     lifecycle: "draft",
     title,
     goal,
-    slots: [
-      { slot_id: crypto.randomUUID(), name: "核心证据", description: "", position: 0, required: true },
-      { slot_id: crypto.randomUUID(), name: "补充证据", description: "", position: 1, required: false },
-      { slot_id: crypto.randomUUID(), name: "待核验", description: "", position: 2, required: false },
-    ],
+    slots: slotNames.map((name, position) => ({ slot_id: crypto.randomUUID(), name, description: "", position, required: position === 0 })),
     items: [],
     created_at: now,
     updated_at: now,
     migrated_from_v1: false,
+    template_id: templateId,
+    citation_style: "gb-t-7714-2015",
   };
   tasks = [task, ...tasks];
   return task;
@@ -170,8 +253,25 @@ function summaries(): WorkspaceTaskSummary[] {
     unresolved_count: task.items.filter((item) => item.source_status === "source_unconfirmed").length,
     updated_at: task.updated_at,
     writable: true,
+    template_id: task.template_id,
+    stale_count: task.items.filter(
+      (item) => item.freshness_status === "changed" || item.freshness_status === "missing",
+    ).length,
   }));
 }
+
+const workspaceChanges: WorkspaceChange[] = [{
+  change_id: "change-1",
+  workspace_id: workspace.workspace_id,
+  kind: "modified",
+  document_id: "document-9",
+  name: "课程材料.zip",
+  relative_path: "课程材料.zip",
+  occurred_at: now,
+  message: "压缩包内容已变化，相关资料包需要复核。",
+  affected_task_ids: [],
+  acknowledged: false,
+}];
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -259,6 +359,22 @@ export function mockPreviewUrl(documentId: string, page: number): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
+export function mockContentUrl(documentId: string): string {
+  const document = documents.find((item) => item.document_id === documentId);
+  const title = document?.name ?? "内容预览";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="720"><rect width="100%" height="100%" fill="#f7f9f8"/><rect x="72" y="64" width="880" height="592" rx="4" fill="#fff" stroke="#ccd5d1"/><text x="112" y="128" font-family="sans-serif" font-size="28" fill="#17201e">${title}</text><text x="112" y="190" font-family="sans-serif" font-size="20" fill="#46524e">本地图片内容预览</text><rect x="108" y="228" width="720" height="58" fill="#fff1a8"/><text x="124" y="266" font-family="sans-serif" font-size="18" fill="#283431">OCR 命中：访谈主题、学习投入与反馈频率</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+export function mockResearchPackBlob(task: WorkspaceTask, options: ResearchPackExportRequest): Blob {
+  return new Blob([JSON.stringify({
+    mock_archive: true,
+    files: ["research.md", "references.bib", "task.json", "manifest.json"],
+    task,
+    options,
+  }, null, 2)], { type: "application/zip" });
+}
+
 export async function mockRequest<T>(
   path: string,
   method: string,
@@ -271,10 +387,59 @@ export async function mockRequest<T>(
   if (path === `/v2/workspaces/${workspace.workspace_id}` && method === "GET") return workspace as T;
   if (path.endsWith("/sync") && method === "POST") return job() as T;
   if (path.endsWith("/documents") && method === "GET") return documents as T;
+  if (path.endsWith("/members") && method === "GET") return documents.filter((item) => item.source_ref?.kind === "archive_member") as T;
+  if (path.endsWith("/open-target") && method === "POST") {
+    const documentId = path.split("/").at(-2) ?? "";
+    const document = documents.find((item) => item.document_id === documentId);
+    return {
+      uri: document?.source_uri ?? `file:///C:/Users/Demo/Documents/${documentId}`,
+      temporary: document?.source_ref?.kind === "archive_member",
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+      display_name: document?.name ?? documentId,
+      source_ref: document?.source_ref ?? null,
+    } as T;
+  }
   if (path.endsWith("/reprocess") && method === "POST") return job() as T;
+  if (path.endsWith("/ai-index") && method === "GET") return structuredClone(aiIndex) as T;
+  if (path.endsWith("/ai-index") && method === "POST") {
+    const value = job();
+    aiIndex = { ...aiIndex, indexed_document_count: aiIndex.document_count, pending_document_count: 0, indexed_folder_count: aiIndex.folder_count, pending_folder_count: 0, estimated_calls: 0, last_run_at: new Date().toISOString() };
+    value.kind = "workspace_ai_index";
+    return value as T;
+  }
   if (path.endsWith("/search") && method === "POST") {
     const request = body as { query: string; mode: "local" | "assisted" };
     return searchReport(request.query, request.mode) as T;
+  }
+  if (path.endsWith("/task-proposals") && method === "POST") {
+    const request = body as { goal: string; title?: string };
+    const candidates = allResults.slice(0, 3).flatMap((item) => [{
+      candidate_id: `${item.document_id}-0`,
+      document_id: item.document_id,
+      content_hash: item.content_hash,
+      name: item.name,
+      relative_path: item.relative_path,
+      page_number: item.best_evidence.page_number,
+      locator: null,
+      excerpt: item.best_evidence.excerpt,
+      reason: item.best_evidence.reason,
+      quality_score: item.best_evidence.quality_score,
+      source_ref: null,
+      overview: item.overview,
+    }]);
+    return {
+      title: request.title || "研究资料包",
+      goal: request.goal,
+      summary: `围绕“${request.goal}”整理了 ${candidates.length} 条候选证据。`,
+      warnings: [],
+      gaps: [],
+      candidates,
+      slots: [{ name: "核心证据", description: "直接支持目标的证据。", required: true, candidate_ids: candidates.map((item) => item.candidate_id), rationales: {} }],
+    } as ResearchTaskProposal as T;
+  }
+  if (path.endsWith("/task-proposals/confirm") && method === "POST") {
+    const proposal = (body as { proposal: ResearchTaskProposal }).proposal;
+    return createTask(proposal.title, proposal.goal) as T;
   }
   if (path.endsWith("/ai-settings/test") && method === "POST") {
     const request = body as AISettingsInputV2;
@@ -301,10 +466,11 @@ export async function mockRequest<T>(
   }
   if (path.endsWith("/tasks") && method === "GET") return summaries() as T;
   if (path.endsWith("/tasks") && method === "POST") {
-    const request = body as { title: string; goal: string };
-    return createTask(request.title, request.goal) as T;
+    const request = body as { title: string; goal: string; template_id?: TaskTemplateId };
+    return createTask(request.title, request.goal, request.template_id) as T;
   }
-  const taskMatch = path.match(/\/tasks\/([^/]+)(?:\/(markdown|archive))?$/);
+  if (path.endsWith("/changes") && method === "GET") return structuredClone(workspaceChanges) as T;
+  const taskMatch = path.match(/\/tasks\/([^/]+)(?:\/(markdown|archive|revalidate))?$/);
   if (taskMatch) {
     const taskId = taskMatch[1] ?? "";
     const action = taskMatch[2];
@@ -318,6 +484,21 @@ export async function mockRequest<T>(
       const archived = { ...task, lifecycle: "archived" as const, revision: task.revision + 1 };
       tasks[index] = archived;
       return archived as T;
+    }
+    if (action === "revalidate") {
+      const refreshed = {
+        ...task,
+        revision: task.revision + 1,
+        updated_at: new Date().toISOString(),
+        items: task.items.map((item) => ({
+          ...item,
+          source_status: "resolved" as const,
+          freshness_status: "current" as const,
+          confirmed_content_hash: item.content_hash,
+        })),
+      };
+      tasks[index] = refreshed;
+      return refreshed as T;
     }
     if (method === "PUT") {
       const request = body as { expected_revision: number; task: WorkspaceTask };

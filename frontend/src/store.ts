@@ -6,7 +6,16 @@ import type {
   WorkspaceTask,
 } from "./types";
 
-export const EMPTY_FILTERS: SearchFiltersV2 = { path_prefix: "", extensions: [] };
+export const EMPTY_FILTERS: SearchFiltersV2 = {
+  path_prefix: "",
+  extensions: [],
+  source_kinds: [],
+  readability: [],
+  indexing_states: [],
+  modified_from: "",
+  modified_to: "",
+  task_id: "",
+};
 
 interface AppState {
   page: PageId;
@@ -34,7 +43,7 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  page: "search",
+  page: "home",
   workspaceId: "",
   inspector: null,
   inspectorOpen: false,

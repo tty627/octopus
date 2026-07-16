@@ -51,6 +51,10 @@ def workspace_tasks_path(workspace_id: str) -> Path:
     return global_config_path().parent / "workspaces" / workspace_id / "tasks"
 
 
+def runtime_jobs_path() -> Path:
+    return local_data_root() / "runtime-jobs.json"
+
+
 def octopus_dir(index_repository: Path) -> Path:
     return index_repository / ".octopus"
 

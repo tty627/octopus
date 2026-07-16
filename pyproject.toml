@@ -23,6 +23,8 @@ dependencies = [
   "onnxruntime>=1.20,<2",
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
+  "watchdog>=6,<7",
+  "citeproc-py>=0.10,<1",
   "pywin32>=310,<312; sys_platform == 'win32'",
   "packaging>=24,<27",
   "pywebview>=5.4,<6; sys_platform == 'win32'",
