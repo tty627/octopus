@@ -151,6 +151,26 @@ class GlobalRepository(OctopusModel):
     enabled: bool = True
 
 
+class WorkspaceArchivePolicy(OctopusModel):
+    enabled: bool = True
+    max_entries: int = Field(default=10_000, ge=1, le=100_000)
+    max_member_bytes: int = Field(default=100 * 1024**2, ge=1, le=2 * 1024**3)
+    max_total_bytes: int = Field(default=512 * 1024**2, ge=1, le=8 * 1024**3)
+    max_compression_ratio: float = Field(default=100.0, ge=1.0, le=10_000.0)
+    nested_zip_depth: int = Field(default=1, ge=0, le=2)
+    materialized_cache_ttl_hours: int = Field(default=24, ge=1, le=720)
+    materialized_cache_max_bytes: int = Field(default=2 * 1024**3, ge=1, le=32 * 1024**3)
+
+
+class WorkspaceSyncPolicy(OctopusModel):
+    auto_sync_enabled: bool = True
+    debounce_seconds: int = Field(default=5, ge=1, le=300)
+    reconciliation_interval_minutes: int = Field(default=10, ge=1, le=1_440)
+    stable_check_seconds: int = Field(default=2, ge=0, le=120)
+    stable_retry_count: int = Field(default=3, ge=0, le=10)
+    excluded_globs: list[str] = Field(default_factory=list)
+
+
 class GlobalWorkspace(OctopusModel):
     workspace_id: str
     name: str
@@ -160,6 +180,8 @@ class GlobalWorkspace(OctopusModel):
     enabled: bool = True
     vision_enabled: bool = False
     ai_policy: AIConfig = Field(default_factory=AIConfig)
+    archive_policy: WorkspaceArchivePolicy = Field(default_factory=WorkspaceArchivePolicy)
+    sync_policy: WorkspaceSyncPolicy = Field(default_factory=WorkspaceSyncPolicy)
 
 
 class ServiceConfig(OctopusModel):
@@ -624,12 +646,23 @@ class JobStatus(StrEnum):
     running = "running"
     succeeded = "succeeded"
     failed = "failed"
+    canceled = "canceled"
+    interrupted = "interrupted"
 
 
 class ServiceJob(OctopusModel):
     job_id: str
     repository_id: str
-    kind: Literal["update", "rebuild_search", "validate", "package", "workspace_sync"]
+    kind: Literal[
+        "update",
+        "rebuild_search",
+        "validate",
+        "package",
+        "workspace_sync",
+        "workspace_rebuild",
+        "workspace_ai_index",
+        "task_export",
+    ]
     status: JobStatus = JobStatus.queued
     created_at: str = Field(default_factory=utc_now)
     started_at: str = ""
@@ -637,6 +670,8 @@ class ServiceJob(OctopusModel):
     result: dict[str, Any] = Field(default_factory=dict)
     error_code: str = ""
     error_message: str = ""
+    cancel_requested: bool = False
+    resumed_from_job_id: str = ""
 
 
 class ContentParser(Protocol):

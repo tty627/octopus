@@ -326,7 +326,7 @@ describe("task resilience", () => {
     expect(screen.getByRole("status")).toHaveTextContent("来源待重新确认");
     expect(screen.getByText("1 条待核验")).toBeVisible();
     expect(screen.queryByText("已确认")).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /^(已确认|待核验)$/ })).not.toBeInTheDocument();
     expect(document.querySelector(".confirmedDot")).not.toBeInTheDocument();
     expect(document.querySelector(".pendingDot")).toBeInTheDocument();
     client.clear();
@@ -348,10 +348,10 @@ describe("task resilience", () => {
     });
 
     const client = renderWithClient(<TaskPacksView />);
-    const titleInput = screen.getByRole("textbox", { name: "任务名称" });
+    const titleInput = screen.getByRole("textbox", { name: "资料包名称" });
     await userEvent.clear(titleInput);
     await userEvent.type(titleInput, "刚编辑的新标题");
-    await userEvent.click(screen.getByRole("button", { name: "返回任务列表" }));
+    await userEvent.click(screen.getByRole("button", { name: "返回资料包列表" }));
 
     await waitFor(() => expect(api.saveTask).toHaveBeenCalledWith(expect.objectContaining({ title: "刚编辑的新标题" })));
     expect(await screen.findByRole("button", { name: /刚编辑的新标题/ })).toBeVisible();
@@ -370,10 +370,10 @@ describe("task resilience", () => {
     vi.spyOn(api, "saveTask").mockRejectedValue(new ApiError("暂时无法保存", 503));
 
     const client = renderWithClient(<TaskPacksView />);
-    await userEvent.click(screen.getByRole("button", { name: "返回任务列表" }));
+    await userEvent.click(screen.getByRole("button", { name: "返回资料包列表" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("暂时无法保存");
-    expect(screen.getByRole("textbox", { name: "任务名称" })).toHaveValue("待保存标题");
+    expect(screen.getByRole("textbox", { name: "资料包名称" })).toHaveValue("待保存标题");
     expect(useAppStore.getState().activeTask?.task_id).toBe("task-1");
     client.clear();
   });
@@ -389,8 +389,8 @@ describe("task resilience", () => {
     }
 
     const client = renderWithClient(<Harness />);
-    await userEvent.click(await screen.findByRole("button", { name: "新建" }));
-    await waitFor(() => expect(api.createTask).toHaveBeenCalledWith("workspace-1", "新的证据任务", ""));
+    await userEvent.click(await screen.findByRole("button", { name: "创建资料包" }));
+    await waitFor(() => expect(api.createTask).toHaveBeenCalledWith("workspace-1", "新的文献综述", "", "literature_review"));
     act(() => useAppStore.getState().setWorkspaceId("workspace-2"));
     resolveCreate?.(task({ workspace_id: "workspace-1", title: "A 空间任务" }));
     await act(async () => { await Promise.resolve(); });
@@ -458,7 +458,7 @@ describe("task resilience", () => {
     vi.spyOn(api, "task").mockResolvedValue(existing);
     const client = renderWithClient(<TaskPacksView />);
 
-    await userEvent.click(await screen.findByRole("button", { name: "新建" }));
+    await userEvent.click(await screen.findByRole("button", { name: "创建资料包" }));
     await waitFor(() => expect(api.createTask).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByRole("button", { name: /现有任务/ }));
     await waitFor(() => expect(useAppStore.getState().activeTask?.task_id).toBe("task-existing"));
@@ -584,7 +584,7 @@ describe("workspace-bound evidence", () => {
     await userEvent.type(screen.getByRole("textbox", { name: "搜索原始资料" }), "微分方程");
     expect(screen.getByText("级数", { selector: "mark" })).toBeVisible();
 
-    await userEvent.click(screen.getByRole("button", { name: "将 证据.pdf 加入任务" }));
+    await userEvent.click(screen.getByRole("button", { name: "将 证据.pdf 加入资料包" }));
     expect(addResult).toHaveBeenCalledWith(searched, searched.best_evidence, "级数", "workspace-1");
     client.clear();
   });
@@ -679,7 +679,7 @@ describe("workspace-bound evidence", () => {
     expect(screen.getByRole("button", { name: "当前页无命中" })).toBeDisabled();
 
     await userEvent.click(screen.getByRole("button", { name: "第 5 页" }));
-    await userEvent.click(screen.getByRole("button", { name: "加入任务" }));
+    await userEvent.click(screen.getByRole("button", { name: "加入资料包" }));
     expect(onAdd).toHaveBeenCalledWith(inspected, inspected.additional_evidence[0]);
     client.clear();
   });
@@ -695,8 +695,8 @@ describe("workspace-bound evidence", () => {
     vi.spyOn(bridge, "openLocalUri").mockRejectedValue(new Error("missing"));
     const client = renderWithClient(<EvidenceInspector onAdd={vi.fn()} adding={false} actionError="" />);
 
-    await userEvent.click(screen.getByRole("button", { name: "打开原文件" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("原文件已不可访问，请同步后重新定位。");
+    await userEvent.click(screen.getByRole("button", { name: "打开来源" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("来源当前不可访问，请同步后重新定位。");
     client.clear();
   });
 });

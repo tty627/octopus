@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  House,
   Library,
   ListTodo,
   Octagon,
@@ -20,6 +21,7 @@ import type { PageId, ServiceJob, Workspace } from "./types";
 import { workspaceOptionLabels, workspaceSyncStatusText } from "./workspaceUi";
 import { AISettingsView } from "./components/AISettingsView";
 import { EvidenceInspector } from "./components/EvidenceInspector";
+import { HomeView } from "./components/HomeView";
 import { Onboarding } from "./components/Onboarding";
 import { RepositoriesView } from "./components/RepositoriesView";
 import { SearchWorkspace } from "./components/SearchWorkspace";
@@ -28,8 +30,9 @@ import { TaskTray } from "./components/TaskTray";
 import { useTaskActions } from "./taskPackActions";
 
 const navItems: Array<{ id: PageId; label: string; icon: typeof Search }> = [
+  { id: "home", label: "首页", icon: House },
   { id: "search", label: "搜索", icon: Search },
-  { id: "tasks", label: "任务", icon: ListTodo },
+  { id: "tasks", label: "资料包", icon: ListTodo },
   { id: "documents", label: "资料", icon: Library },
   { id: "settings", label: "设置", icon: Settings },
 ];
@@ -185,6 +188,7 @@ export default function App() {
         <div className="navFooter"><span className="localBadge">仅本机</span><small>原文件只读</small></div>
       </nav>
       <main className="mainWorkspace">
+        {page === "home" && <HomeView key={workspaceId} workspace={currentWorkspace} />}
         {page === "search" && <SearchWorkspace addResult={addResult} adding={adding} actionError={actionError} clearActionError={clearActionError} />}
         {page === "tasks" && <TaskPacksView key={workspaceId} />}
         {page === "documents" && <RepositoriesView key={workspaceId} workspace={currentWorkspace} />}

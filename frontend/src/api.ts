@@ -1,17 +1,23 @@
 import { bootstrapDesktop } from "./bridge";
-import { mockPreviewUrl, mockRequest } from "./mockApi";
+import { mockContentUrl, mockPreviewUrl, mockRequest, mockResearchPackBlob } from "./mockApi";
 import type {
   AIConnectionResult,
   AISettingsInputV2,
   AISettingsV2,
+  AIIndexStatus,
   BootstrapPayload,
   SearchFiltersV2,
   SearchReportV2,
   ServiceJob,
+  OpenTargetResponse,
+  ResearchPackExportRequest,
   Workspace,
+  WorkspaceChange,
   WorkspaceDocument,
   WorkspaceTask,
   WorkspaceTaskSummary,
+  TaskTemplateId,
+  ResearchTaskProposal,
 } from "./types";
 
 export class ApiError extends Error {
@@ -108,6 +114,43 @@ async function previewUrl(
   return URL.createObjectURL(await response.blob());
 }
 
+async function contentUrl(workspaceId: string, documentId: string): Promise<string> {
+  const runtime = await runtimeBootstrap();
+  if (runtime.base_url.startsWith("mock:")) return mockContentUrl(documentId);
+  const response = await fetch(
+    `${runtime.base_url}/v2/workspaces/${workspaceId}/documents/${documentId}/content`,
+    { headers: { Authorization: `Bearer ${runtime.token}` } },
+  );
+  if (!response.ok) throw new ApiError("内容预览暂时不可用。", response.status);
+  return URL.createObjectURL(await response.blob());
+}
+
+async function taskExport(
+  task: WorkspaceTask,
+  options: ResearchPackExportRequest,
+): Promise<Blob> {
+  const runtime = await runtimeBootstrap();
+  if (runtime.base_url.startsWith("mock:")) {
+    return mockResearchPackBlob(task, options);
+  }
+  const response = await fetch(
+    `${runtime.base_url}/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/export`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${runtime.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(options),
+    },
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new ApiError(apiErrorMessage(response.status, detail), response.status, detail);
+  }
+  return response.blob();
+}
+
 export const api = {
   workspaces: () => request<Workspace[]>("/v2/workspaces"),
   workspace: (workspaceId: string) => request<Workspace>(`/v2/workspaces/${workspaceId}`),
@@ -120,6 +163,10 @@ export const api = {
     request<ServiceJob>(`/v2/workspaces/${workspaceId}/sync`, { method: "POST" }),
   documents: (workspaceId: string) =>
     request<WorkspaceDocument[]>(`/v2/workspaces/${workspaceId}/documents`),
+  documentMembers: (workspaceId: string, documentId: string) =>
+    request<WorkspaceDocument[]>(
+      `/v2/workspaces/${workspaceId}/documents/${documentId}/members`,
+    ),
   reprocessDocument: (workspaceId: string, documentId: string) =>
     request<ServiceJob>(
       `/v2/workspaces/${workspaceId}/documents/${documentId}/reprocess`,
@@ -138,8 +185,21 @@ export const api = {
       signal,
     }),
   previewUrl,
+  contentUrl,
+  openTarget: (workspaceId: string, documentId: string) =>
+    request<OpenTargetResponse>(
+      `/v2/workspaces/${workspaceId}/documents/${documentId}/open-target`,
+      { method: "POST" },
+    ),
   aiSettings: (workspaceId: string) =>
     request<AISettingsV2>(`/v2/workspaces/${workspaceId}/ai-settings`),
+  aiIndexStatus: (workspaceId: string) =>
+    request<AIIndexStatus>(`/v2/workspaces/${workspaceId}/ai-index`),
+  startAIIndex: (workspaceId: string, limit = 20) =>
+    request<ServiceJob>(`/v2/workspaces/${workspaceId}/ai-index`, {
+      method: "POST",
+      body: { limit },
+    }),
   saveAISettings: (workspaceId: string, settings: AISettingsInputV2) =>
     request<AISettingsV2>(`/v2/workspaces/${workspaceId}/ai-settings`, {
       method: "PUT",
@@ -157,10 +217,25 @@ export const api = {
     ),
   tasks: (workspaceId: string) =>
     request<WorkspaceTaskSummary[]>(`/v2/workspaces/${workspaceId}/tasks`),
-  createTask: (workspaceId: string, title: string, goal: string) =>
+  createTask: (
+    workspaceId: string,
+    title: string,
+    goal: string,
+    template_id?: TaskTemplateId,
+  ) =>
     request<WorkspaceTask>(`/v2/workspaces/${workspaceId}/tasks`, {
       method: "POST",
-      body: { title, goal },
+      body: { title, goal, ...(template_id ? { template_id } : {}) },
+    }),
+  createResearchProposal: (workspaceId: string, goal: string, title = "", template_id = "free_research") =>
+    request<ResearchTaskProposal>(`/v2/workspaces/${workspaceId}/task-proposals`, {
+      method: "POST",
+      body: { goal, title, template_id },
+    }),
+  confirmResearchProposal: (workspaceId: string, proposal: ResearchTaskProposal) =>
+    request<WorkspaceTask>(`/v2/workspaces/${workspaceId}/task-proposals/confirm`, {
+      method: "POST",
+      body: { proposal },
     }),
   task: (workspaceId: string, taskId: string) =>
     request<WorkspaceTask>(`/v2/workspaces/${workspaceId}/tasks/${taskId}`),
@@ -178,7 +253,17 @@ export const api = {
     request<string>(
       `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/markdown`,
     ),
+  taskExport,
+  revalidateTask: (task: WorkspaceTask) =>
+    request<WorkspaceTask>(
+      `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/revalidate`,
+      { method: "POST", body: { expected_revision: task.revision } },
+    ),
+  changes: (workspaceId: string) =>
+    request<WorkspaceChange[]>(`/v2/workspaces/${workspaceId}/changes`),
   jobs: (workspaceId: string, signal?: AbortSignal) =>
     request<ServiceJob[]>(`/v2/jobs?workspace_id=${encodeURIComponent(workspaceId)}`, { signal }),
   job: (jobId: string) => request<ServiceJob>(`/v2/jobs/${jobId}`),
+  cancelJob: (jobId: string) =>
+    request<ServiceJob>(`/v2/jobs/${jobId}/cancel`, { method: "POST" }),
 };

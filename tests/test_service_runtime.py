@@ -9,7 +9,7 @@ from threading import Barrier, Event
 import pytest
 
 from octopus.config import repository_config_path
-from octopus.models import JobStatus, RepositoryConfig
+from octopus.models import JobStatus, RepositoryConfig, ServiceJob
 from octopus.service_control import ensure_service_token, service_token_path, validate_loopback_host
 from octopus.service_runtime import JobManager, RepositoryScheduler
 from octopus.utils import atomic_write_json
@@ -19,7 +19,12 @@ def _wait(manager: JobManager, job_id: str) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         job = manager.get(job_id)
-        if job and job.status in {JobStatus.succeeded, JobStatus.failed}:
+        if job and job.status in {
+            JobStatus.succeeded,
+            JobStatus.failed,
+            JobStatus.canceled,
+            JobStatus.interrupted,
+        }:
             return
         time.sleep(0.01)
     raise AssertionError("job did not complete")
@@ -140,6 +145,49 @@ def test_job_manager_submits_only_one_unique_progress_job_under_concurrency() ->
     assert manager.active("workspace", "workspace_sync")
     release.set()
     _wait(manager, accepted[0].job_id)
+    manager.shutdown()
+
+
+def test_job_manager_persists_jobs_and_marks_incomplete_work_interrupted(tmp_path: Path) -> None:
+    storage = tmp_path / "runtime-jobs.json"
+    atomic_write_json(
+        storage,
+        [
+            ServiceJob(
+                job_id="persisted",
+                repository_id="workspace",
+                kind="workspace_sync",
+                status=JobStatus.running,
+            ).model_dump(mode="json")
+        ],
+    )
+
+    manager = JobManager(max_workers=1, storage_path=storage)
+    restored = manager.get("persisted")
+    assert restored is not None
+    assert restored.status == JobStatus.interrupted
+    assert restored.error_code == "service_restarted"
+    manager.shutdown()
+
+
+def test_job_manager_cancels_progress_jobs_cooperatively(tmp_path: Path) -> None:
+    manager = JobManager(max_workers=1, storage_path=tmp_path / "jobs.json")
+    started = Event()
+
+    def execute(report: Callable[[dict[str, object]], None]) -> dict[str, object]:
+        started.set()
+        while True:
+            report({"phase": "processing"})
+            time.sleep(0.01)
+
+    job = manager.submit_with_progress("workspace", "workspace_sync", execute)
+    assert started.wait(timeout=5)
+    canceled = manager.cancel(job.job_id)
+    assert canceled is not None and canceled.cancel_requested
+    _wait(manager, job.job_id)
+    completed = manager.get(job.job_id)
+    assert completed is not None
+    assert completed.status == JobStatus.canceled
     manager.shutdown()
 
 

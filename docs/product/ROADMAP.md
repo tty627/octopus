@@ -17,11 +17,10 @@
 | [v0.9](../releases/v0.9.md) | 工程 RC 已完成 | Release Candidate | v0.8 | 无 P0/P1，契约冻结和工程发布审计通过 |
 | [v1.0](../releases/v1.0.md) | 工程最终版本已完成 | 正式版目标 | v0.9 | 源码/契约/工件工程门禁通过；签名/真人外部发布未声称 |
 | [v1.1](../releases/v1.1.md) | 核心闭环开发版 | 本地资料导航与任务装配工作台 | v1.0、Local API v1 | WebView2 桌面端、搜索证据闭环、持久任务包与 unsigned 安装验证通过 |
-| V2 development | `2.0.0.dev1` 已发布 | 原始资料搜索与可信页面证据 | PDFium、OCR、SQLite/FTS5、Local API V2 | PDF/文本导入、搜索、页面预览、任务和 Markdown 导出闭环通过 |
+| V2.1 development | `2.1.0.dev0` 发布候选 | 研究资料搜索、可信定位与可引用资料包 | 统一来源模型、Office/图片解析、ZIP、SQLite/FTS5、Local API 2.1 | 多格式/ZIP 搜索、来源核验、研究资料包、引用导出和可选 AI 提案闭环通过 |
 
 ## 当前焦点
 
-`2.0.0.dev1` 开发预览已由 Windows CI 发布。当前焦点是继续验证本地证据闭环：隐藏 SQLite 资料空间、PDF 页面检索、证据检查器、任务、
-Markdown 导出与基础健康恢复。Office 深度正文解析、最近变化、完整新鲜度差异、关系图、Agent 交接、跨资料
-空间搜索和独立 Markmap HTML 留到后续阶段。开发预发布由版本 Tag 的 Windows CI 自动生成；签名正式版、
-干净机/Defender 和真人角色仍是后续外部门槛，不与本轮开发安装验证混淆。
+`2.1.0.dev0` 将 V2 扩展为学习和研究资料工作台：PDF、文本、首批 Office、图片和 ZIP 成员进入统一来源与证据定位模型，
+研究资料包支持模板、引用、新鲜度检查和结构化导出，可选 AI 负责生成可核验提案而不是替代本地搜索。当前焦点是通过 Windows
+开发预览验证这些闭环。关系图、跨资料空间搜索、独立 Markmap HTML、签名正式版、干净机/Defender 和真人角色仍是后续门槛。

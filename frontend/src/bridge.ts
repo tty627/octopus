@@ -43,7 +43,7 @@ export async function bootstrapDesktop(): Promise<BootstrapPayload> {
     return {
       base_url: "mock://octopus",
       token: "development-memory-token",
-      product_version: "2.0.0.dev1",
+      product_version: "2.1.0.dev0",
       platform: "browser-demo",
     };
   }
@@ -53,7 +53,7 @@ export async function bootstrapDesktop(): Promise<BootstrapPayload> {
     return {
       base_url: "mock://octopus",
       token: "development-memory-token",
-      product_version: "2.0.0.dev1",
+      product_version: "2.1.0.dev0",
       platform: "browser-demo",
     };
   }
@@ -75,6 +75,16 @@ export async function saveTextFile(name: string, content: string): Promise<boole
   anchor.click();
   URL.revokeObjectURL(url);
   return true;
+}
+
+export function saveBlobFile(name: string, content: Blob): Promise<boolean> {
+  const url = URL.createObjectURL(content);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  return Promise.resolve(true);
 }
 
 export async function openLocalUri(uri: string): Promise<void> {

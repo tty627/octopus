@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import math
@@ -10,10 +11,10 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -28,14 +29,33 @@ from .config import (
     load_repository_config,
     save_global_config,
     workspace_storage_path,
+    workspace_tasks_path,
 )
 from .credentials import CredentialStoreError, resolve_ai_api_key
 from .models import AIConfig, GlobalWorkspace, OctopusModel, utc_now
-from .utils import sha256_file
+from .utils import load_json, sha256_file
+from .workspace_sources import (
+    ArchiveCandidate,
+    ArchivePolicy,
+    EvidenceLocator,
+    SourceRef,
+    cache_expiry,
+    materialize_source_ref,
+    physical_source_ref,
+    scan_archive,
+)
 
-WORKSPACE_SCHEMA_VERSION = "2.0"
+WORKSPACE_SCHEMA_VERSION = "2.1"
+PARSER_API_VERSION = "2.1"
 READABLE_THRESHOLD = 0.72
 PARTIAL_THRESHOLD = 0.45
+MAX_TEXT_BYTES = 100 * 1024 * 1024
+MAX_TEXT_CHARACTERS = 2_000_000
+MAX_DOCX_PARAGRAPHS = 50_000
+MAX_DOCX_TABLE_CELLS = 100_000
+MAX_XLSX_CELLS = 100_000
+MAX_PPTX_SLIDES = 5_000
+MAX_IMAGE_PIXELS = 80_000_000
 TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -59,6 +79,8 @@ TEXT_EXTENSIONS = {
     ".css",
     ".sql",
 }
+OFFICE_EXTENSIONS = {".docx", ".xlsx", ".xlsm", ".pptx"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"}
 IGNORED_DIRECTORY_NAMES = {
     ".git",
     ".hg",
@@ -77,6 +99,7 @@ _EXTRACTION_PROGRESS_CALLBACK: ContextVar[ExtractionProgressCallback | None] = C
 
 class WorkspaceEvidence(OctopusModel):
     page_number: int | None = None
+    locator: EvidenceLocator | None = None
     heading: str = ""
     excerpt: str
     reason: str
@@ -96,6 +119,15 @@ class WorkspaceSearchResult(OctopusModel):
     readability_score: float = Field(ge=0.0, le=1.0)
     indexing_state: Literal["indexed", "metadata_only", "failed"]
     source_uri: str
+    source_ref: SourceRef | None = None
+    locator: EvidenceLocator | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+    error_code: str = ""
+    parser_key: str = ""
+    parser_version: str = ""
+    freshness_status: Literal[
+        "current", "stale", "changed", "missing", "unverified", "unavailable", "needs_review"
+    ] = "current"
     overview: str = ""
     best_evidence: WorkspaceEvidence
     additional_evidence: list[WorkspaceEvidence] = Field(default_factory=list)
@@ -155,6 +187,15 @@ class WorkspaceDocument(OctopusModel):
     indexing_state: Literal["indexed", "metadata_only", "failed"]
     error: str = ""
     source_uri: str
+    source_ref: SourceRef | None = None
+    locator: EvidenceLocator | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+    error_code: str = ""
+    parser_key: str = ""
+    parser_version: str = ""
+    freshness_status: Literal[
+        "current", "stale", "changed", "missing", "unverified", "unavailable", "needs_review"
+    ] = "current"
 
 
 @dataclass(frozen=True)
@@ -163,6 +204,7 @@ class ExtractedPage:
     text: str
     extraction_method: str
     quality_score: float
+    locator: EvidenceLocator | None = None
 
     @property
     def readability(self) -> Literal["readable", "partial", "low"]:
@@ -176,6 +218,10 @@ class ExtractedSource:
     page_count: int
     status: str = "indexed"
     error: str = ""
+    quality_flags: list[str] = field(default_factory=list)
+    error_code: str = ""
+    parser_key: str = ""
+    parser_version: str = PARSER_API_VERSION
 
 
 def _script_name(character: str) -> str:
@@ -219,10 +265,7 @@ def readability_score(text: str) -> float:
     )
     replacement_ratio = sum(character in {"\ufffd", "\x00"} for character in compact) / total
     semantic_ratio = (
-        sum(
-            character.isalnum() or "\u4e00" <= character <= "\u9fff"
-            for character in compact
-        )
+        sum(character.isalnum() or "\u4e00" <= character <= "\u9fff" for character in compact)
         / total
     )
     scripts = Counter(
@@ -246,8 +289,7 @@ def readability_score(text: str) -> float:
             (
                 max(
                     Counter(
-                        tuple(compact[index : index + size])
-                        for index in range(total - size + 1)
+                        tuple(compact[index : index + size]) for index in range(total - size + 1)
                     ).values()
                 )
                 * size
@@ -433,6 +475,7 @@ def _extract_pdf(
                     text=selected_text,
                     extraction_method=method,
                     quality_score=score,
+                    locator=EvidenceLocator(kind="page", page_number=page_number),
                 )
             )
             report_progress(
@@ -448,29 +491,74 @@ def _extract_pdf(
     metadata: Any = reader.metadata if reader is not None else None
     metadata = metadata or {}
     title = str(metadata.get("/Title", "")).strip() or path.stem
-    return ExtractedSource(title=title, pages=pages, page_count=len(pages))
+    return ExtractedSource(
+        title=title,
+        pages=pages,
+        page_count=len(pages),
+        parser_key="v2.pdf",
+        parser_version="2",
+    )
 
 
-def _decode_text(path: Path) -> str:
-    data = path.read_bytes()
-    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+def _text_encoding(sample: bytes) -> str:
+    if sample.startswith(codecs.BOM_UTF8):
+        return "utf-8-sig"
+    if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "utf-16"
+    for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
         try:
-            return data.decode(encoding)
+            sample.decode(encoding)
+            return encoding
         except UnicodeDecodeError:
             continue
     try:
         from charset_normalizer import from_bytes
 
-        best = from_bytes(data).best()
-        if best is not None:
-            return str(best)
+        best = from_bytes(sample).best()
+        if best is not None and best.encoding:
+            return str(best.encoding)
     except ImportError:
         pass
-    return data.decode("utf-8", errors="replace")
+    return "utf-8"
+
+
+def _decode_text(path: Path) -> tuple[str, bool]:
+    with path.open("rb") as source:
+        sample = source.read(min(1024 * 1024, MAX_TEXT_BYTES))
+        encoding = _text_encoding(sample)
+        source.seek(0)
+        decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        chunks: list[str] = []
+        bytes_read = 0
+        characters = 0
+        truncated = False
+        while bytes_read < MAX_TEXT_BYTES and characters < MAX_TEXT_CHARACTERS:
+            chunk = source.read(min(1024 * 1024, MAX_TEXT_BYTES - bytes_read))
+            if not chunk:
+                break
+            bytes_read += len(chunk)
+            decoded = decoder.decode(chunk)
+            remaining = MAX_TEXT_CHARACTERS - characters
+            if len(decoded) > remaining:
+                decoded = decoded[:remaining]
+                truncated = True
+            chunks.append(decoded)
+            characters += len(decoded)
+        if source.read(1):
+            truncated = True
+        if characters < MAX_TEXT_CHARACTERS:
+            tail = decoder.decode(b"", final=True)
+            remaining = MAX_TEXT_CHARACTERS - characters
+            if len(tail) > remaining:
+                tail = tail[:remaining]
+                truncated = True
+            chunks.append(tail)
+    return "".join(chunks), truncated
 
 
 def _extract_text(path: Path) -> ExtractedSource:
-    text = _decode_text(path)
+    text, truncated = _decode_text(path)
+    lines = text.count("\n") + (1 if text else 0)
     return ExtractedSource(
         title=path.stem,
         pages=[
@@ -479,19 +567,346 @@ def _extract_text(path: Path) -> ExtractedSource:
                 text=text,
                 extraction_method="text",
                 quality_score=readability_score(text),
+                locator=EvidenceLocator(
+                    kind="text_line",
+                    line_start=1 if lines else None,
+                    line_end=lines or None,
+                ),
             )
         ],
         page_count=0,
+        quality_flags=["extraction_truncated"] if truncated else [],
+        error_code="extraction_budget_exceeded" if truncated else "",
+        parser_key="v2.text",
+        parser_version="2",
     )
 
 
+def _extract_docx(path: Path) -> ExtractedSource:
+    try:
+        from docx import Document
+    except ImportError:
+        return ExtractedSource(
+            title=path.stem,
+            pages=[],
+            page_count=0,
+            status="metadata_only",
+            quality_flags=["docx_parser_unavailable"],
+            error_code="docx_parser_unavailable",
+            parser_key="v2.docx",
+            parser_version="1",
+        )
+    document = Document(str(path))
+    pages: list[ExtractedPage] = []
+    flags: list[str] = []
+    for index, paragraph in enumerate(document.paragraphs, start=1):
+        if index > MAX_DOCX_PARAGRAPHS:
+            flags.append("docx_paragraph_limit")
+            break
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        label = ""
+        if paragraph.style and paragraph.style.name.casefold().startswith("heading"):
+            label = paragraph.style.name
+        pages.append(
+            ExtractedPage(
+                page_number=None,
+                text=text,
+                extraction_method="docx",
+                quality_score=readability_score(text),
+                locator=EvidenceLocator(
+                    kind="paragraph",
+                    paragraph_index=index,
+                    label=label,
+                ),
+            )
+        )
+    cells = 0
+    for table_index, table in enumerate(document.tables, start=1):
+        rows: list[str] = []
+        for row in table.rows:
+            values: list[str] = []
+            for cell in row.cells:
+                cells += 1
+                if cells > MAX_DOCX_TABLE_CELLS:
+                    flags.append("docx_table_cell_limit")
+                    break
+                values.append(cell.text.strip())
+            if values:
+                rows.append(" | ".join(values))
+            if cells > MAX_DOCX_TABLE_CELLS:
+                break
+        text = "\n".join(rows).strip()
+        if text:
+            pages.append(
+                ExtractedPage(
+                    page_number=None,
+                    text=text,
+                    extraction_method="docx-table",
+                    quality_score=readability_score(text),
+                    locator=EvidenceLocator(kind="table", table_index=table_index),
+                )
+            )
+        if cells > MAX_DOCX_TABLE_CELLS:
+            break
+    properties = document.core_properties
+    title = str(properties.title or "").strip() or path.stem
+    return ExtractedSource(
+        title=title,
+        pages=pages,
+        page_count=0,
+        quality_flags=sorted(set(flags)),
+        error_code="extraction_budget_exceeded" if flags else "",
+        parser_key="v2.docx",
+        parser_version="1",
+    )
+
+
+def _extract_xlsx(path: Path) -> ExtractedSource:
+    try:
+        import openpyxl  # type: ignore[import-untyped]
+        from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
+    except ImportError:
+        return ExtractedSource(
+            title=path.stem,
+            pages=[],
+            page_count=0,
+            status="metadata_only",
+            quality_flags=["xlsx_parser_unavailable"],
+            error_code="xlsx_parser_unavailable",
+            parser_key="v2.xlsx",
+            parser_version="1",
+        )
+    workbook = openpyxl.load_workbook(
+        path,
+        read_only=True,
+        data_only=False,
+        keep_vba=path.suffix.casefold() == ".xlsm",
+    )
+    pages: list[ExtractedPage] = []
+    flags: list[str] = []
+    cells = 0
+    try:
+        for sheet in workbook.worksheets:
+            rows: list[str] = []
+            last_row = 0
+            last_column = 0
+            for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                values: list[str] = []
+                for column_number, value in enumerate(row, start=1):
+                    cells += 1
+                    if cells > MAX_XLSX_CELLS:
+                        flags.append("xlsx_cell_limit")
+                        break
+                    if value is not None:
+                        last_row = row_number
+                        last_column = max(last_column, column_number)
+                    values.append("" if value is None else str(value))
+                if any(values):
+                    rows.append(" | ".join(values).rstrip())
+                if cells > MAX_XLSX_CELLS:
+                    break
+            text = "\n".join(rows).strip()
+            if text:
+                cell_range = (
+                    f"A1:{get_column_letter(last_column)}{last_row}"
+                    if last_row and last_column
+                    else ""
+                )
+                pages.append(
+                    ExtractedPage(
+                        page_number=None,
+                        text=text,
+                        extraction_method="xlsx",
+                        quality_score=readability_score(text),
+                        locator=EvidenceLocator(
+                            kind="sheet",
+                            sheet_name=str(sheet.title),
+                            cell_range=cell_range,
+                        ),
+                    )
+                )
+            if cells > MAX_XLSX_CELLS:
+                break
+    finally:
+        workbook.close()
+    return ExtractedSource(
+        title=path.stem,
+        pages=pages,
+        page_count=0,
+        quality_flags=sorted(set(flags)),
+        error_code="extraction_budget_exceeded" if flags else "",
+        parser_key="v2.xlsx",
+        parser_version="1",
+    )
+
+
+def _extract_pptx(path: Path) -> ExtractedSource:
+    try:
+        from pptx import Presentation
+    except ImportError:
+        return ExtractedSource(
+            title=path.stem,
+            pages=[],
+            page_count=0,
+            status="metadata_only",
+            quality_flags=["pptx_parser_unavailable"],
+            error_code="pptx_parser_unavailable",
+            parser_key="v2.pptx",
+            parser_version="1",
+        )
+    presentation = Presentation(str(path))
+    pages: list[ExtractedPage] = []
+    flags: list[str] = []
+    for slide_number, slide in enumerate(presentation.slides, start=1):
+        if slide_number > MAX_PPTX_SLIDES:
+            flags.append("pptx_slide_limit")
+            break
+        values = [
+            str(shape.text).strip()
+            for shape in slide.shapes
+            if hasattr(shape, "text") and str(shape.text).strip()
+        ]
+        try:
+            notes = slide.notes_slide.notes_text_frame.text.strip()
+        except (AttributeError, KeyError):
+            notes = ""
+        if notes:
+            values.append(f"[Notes]\n{notes}")
+        text = "\n".join(values).strip()
+        if not text:
+            continue
+        pages.append(
+            ExtractedPage(
+                page_number=None,
+                text=text,
+                extraction_method="pptx",
+                quality_score=readability_score(text),
+                locator=EvidenceLocator(kind="slide", slide_number=slide_number),
+            )
+        )
+    return ExtractedSource(
+        title=path.stem,
+        pages=pages,
+        page_count=0,
+        quality_flags=sorted(set(flags)),
+        error_code="extraction_budget_exceeded" if flags else "",
+        parser_key="v2.pptx",
+        parser_version="1",
+    )
+
+
+def _extract_image(path: Path) -> ExtractedSource:
+    try:
+        from PIL import Image
+    except ImportError:
+        return ExtractedSource(
+            title=path.stem,
+            pages=[],
+            page_count=0,
+            status="metadata_only",
+            quality_flags=["image_parser_unavailable"],
+            error_code="image_parser_unavailable",
+            parser_key="v2.image",
+            parser_version="1",
+        )
+    with Image.open(path) as image:
+        if image.width * image.height > MAX_IMAGE_PIXELS:
+            return ExtractedSource(
+                title=path.stem,
+                pages=[],
+                page_count=0,
+                status="metadata_only",
+                quality_flags=["image_pixel_limit"],
+                error_code="image_pixel_limit",
+                parser_key="v2.image",
+                parser_version="1",
+            )
+        image.load()
+        text = _ocr_text(image).strip()
+    flags = [] if text else ["ocr_returned_no_text"]
+    return ExtractedSource(
+        title=path.stem,
+        pages=[
+            ExtractedPage(
+                page_number=None,
+                text=text,
+                extraction_method="ocr",
+                quality_score=readability_score(text),
+                locator=EvidenceLocator(kind="image", label=path.name),
+            )
+        ],
+        page_count=0,
+        quality_flags=flags,
+        error_code="ocr_returned_no_text" if flags else "",
+        parser_key="v2.image",
+        parser_version="1",
+    )
+
+
+@dataclass(frozen=True)
+class WorkspaceParser:
+    key: str
+    version: str
+    extensions: frozenset[str]
+    extract: Callable[[Path], ExtractedSource]
+
+
+class WorkspaceParserRegistry:
+    def __init__(self) -> None:
+        self.parsers = [
+            WorkspaceParser(
+                "v2.pdf",
+                "2",
+                frozenset({".pdf"}),
+                lambda path: _extract_pdf(path, _EXTRACTION_PROGRESS_CALLBACK.get()),
+            ),
+            WorkspaceParser("v2.docx", "1", frozenset({".docx"}), _extract_docx),
+            WorkspaceParser("v2.xlsx", "1", frozenset({".xlsx", ".xlsm"}), _extract_xlsx),
+            WorkspaceParser("v2.pptx", "1", frozenset({".pptx"}), _extract_pptx),
+            WorkspaceParser("v2.image", "1", frozenset(IMAGE_EXTENSIONS), _extract_image),
+            WorkspaceParser("v2.text", "2", frozenset(TEXT_EXTENSIONS), _extract_text),
+        ]
+
+    def parser_for(self, path: Path) -> WorkspaceParser | None:
+        suffix = path.suffix.casefold()
+        return next((parser for parser in self.parsers if suffix in parser.extensions), None)
+
+    def signature_for(self, path: Path) -> tuple[str, str]:
+        parser = self.parser_for(path)
+        return (parser.key, parser.version) if parser else ("v2.unsupported", "1")
+
+    def extract_source(self, path: Path) -> ExtractedSource:
+        parser = self.parser_for(path)
+        if parser is None:
+            return ExtractedSource(
+                title=path.stem,
+                pages=[],
+                page_count=0,
+                status="metadata_only",
+                quality_flags=["unsupported_content_parser"],
+                error_code="unsupported_content_parser",
+                parser_key="v2.unsupported",
+                parser_version="1",
+            )
+        extracted = parser.extract(path)
+        if extracted.parser_key == parser.key and extracted.parser_version == parser.version:
+            return extracted
+        return replace(extracted, parser_key=parser.key, parser_version=parser.version)
+
+
+PARSER_REGISTRY = WorkspaceParserRegistry()
+
+
+def parser_signature(path: Path) -> tuple[str, str]:
+    if path.suffix.casefold() == ".zip":
+        return ("v2.archive", "1")
+    return PARSER_REGISTRY.signature_for(path)
+
+
 def extract_source(path: Path) -> ExtractedSource:
-    suffix = path.suffix.casefold()
-    if suffix == ".pdf":
-        return _extract_pdf(path, _EXTRACTION_PROGRESS_CALLBACK.get())
-    if suffix in TEXT_EXTENSIONS:
-        return _extract_text(path)
-    return ExtractedSource(title=path.stem, pages=[], page_count=0, status="metadata_only")
+    return PARSER_REGISTRY.extract_source(path)
 
 
 def _iter_source_files(root: Path) -> list[Path]:
@@ -513,6 +928,92 @@ def _iter_source_files(root: Path) -> list[Path]:
 
 def _modified_at(stat: os.stat_result) -> str:
     return datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+
+
+def _json_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError):
+        return []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+def _source_ref_json(source_ref: SourceRef) -> str:
+    return json.dumps(source_ref.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+
+
+def _row_value(row: sqlite3.Row, key: str, default: object = "") -> object:
+    columns = set(row.keys())
+    return row[key] if key in columns else default
+
+
+def _source_ref_from_row(row: sqlite3.Row) -> SourceRef:
+    raw = str(_row_value(row, "source_ref_json") or "")
+    if raw:
+        try:
+            return SourceRef.model_validate_json(raw)
+        except ValueError:
+            pass
+    relative = str(row["relative_path"])
+    kind = str(_row_value(row, "source_kind", "physical") or "physical")
+    if kind == "archive_member":
+        container = str(row["container_path"] or "")
+        member = str(row["member_path"] or Path(relative).name)
+        return SourceRef(
+            kind="archive_member",
+            workspace_path=container,
+            virtual_path=relative,
+            container_path=container,
+            member_path=member,
+            member_chain=[member],
+            archive_depth=1,
+            stable_id=str(row["document_id"]),
+        )
+    return physical_source_ref(relative, archive=kind == "archive").model_copy(
+        update={"stable_id": str(row["document_id"])}
+    )
+
+
+def _quality_flags(value: object) -> list[str]:
+    if isinstance(value, list):
+        return sorted({str(item) for item in value if str(item)})
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError):
+        return []
+    return sorted({str(item) for item in parsed if str(item)}) if isinstance(parsed, list) else []
+
+
+def _locator_from_json(value: object) -> EvidenceLocator | None:
+    raw = str(value or "")
+    if not raw:
+        return None
+    try:
+        return EvidenceLocator.model_validate_json(raw)
+    except ValueError:
+        return None
+
+
+def _freshness_from_value(value: object) -> Literal["current", "stale"]:
+    return "stale" if str(value or "current").casefold() == "stale" else "current"
+
+
+def _stable_snapshot(path: Path, *, attempts: int = 3) -> tuple[os.stat_result, str]:
+    last_stat: os.stat_result | None = None
+    last_hash = ""
+    for _ in range(max(1, attempts)):
+        first = path.stat()
+        digest = sha256_file(path)
+        second = path.stat()
+        if first.st_size == second.st_size and first.st_mtime_ns == second.st_mtime_ns and digest:
+            return second, digest
+        last_stat, last_hash = second, digest
+        time.sleep(0.05)
+    if last_stat is None:
+        raise FileNotFoundError(path)
+    return last_stat, last_hash
 
 
 def _passage_chunks(text: str, *, target: int = 1_600, overlap: int = 180) -> list[str]:
@@ -765,6 +1266,16 @@ class WorkspaceStore:
                 readability_score REAL NOT NULL,
                 indexing_state TEXT NOT NULL,
                 error TEXT NOT NULL,
+                quality_flags_json TEXT NOT NULL DEFAULT '[]',
+                error_code TEXT NOT NULL DEFAULT '',
+                parser_key TEXT NOT NULL DEFAULT '',
+                parser_version TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'physical',
+                container_path TEXT NOT NULL DEFAULT '',
+                member_path TEXT NOT NULL DEFAULT '',
+                source_ref_json TEXT NOT NULL DEFAULT '',
+                parent_document_id TEXT NOT NULL DEFAULT '',
+                freshness_status TEXT NOT NULL DEFAULT 'current',
                 indexed_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS documents_content_hash ON documents(content_hash);
@@ -775,7 +1286,8 @@ class WorkspaceStore:
                 text TEXT NOT NULL,
                 extraction_method TEXT NOT NULL,
                 quality_score REAL NOT NULL,
-                readability TEXT NOT NULL
+                readability TEXT NOT NULL,
+                locator_json TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS passages (
                 passage_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -783,7 +1295,8 @@ class WorkspaceStore:
                 page_number INTEGER,
                 ordinal INTEGER NOT NULL,
                 heading TEXT NOT NULL,
-                text TEXT NOT NULL
+                text TEXT NOT NULL,
+                locator_json TEXT NOT NULL DEFAULT ''
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS passages_fts USING fts5(
                 document_id UNINDEXED,
@@ -795,6 +1308,20 @@ class WorkspaceStore:
                 tokens,
                 tokenize='unicode61 remove_diacritics 2'
             );
+            CREATE TABLE IF NOT EXISTS change_events (
+                change_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                document_id TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                relative_path TEXT NOT NULL DEFAULT '',
+                previous_path TEXT NOT NULL DEFAULT '',
+                occurred_at TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                affected_task_ids_json TEXT NOT NULL DEFAULT '[]',
+                acknowledged INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS change_events_occurred_at
+                ON change_events(occurred_at DESC);
             """
         )
         document_columns = {
@@ -804,12 +1331,370 @@ class WorkspaceStore:
             connection.execute(
                 "ALTER TABLE documents ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0"
             )
+        additive_document_columns = {
+            "quality_flags_json": "TEXT NOT NULL DEFAULT '[]'",
+            "error_code": "TEXT NOT NULL DEFAULT ''",
+            "parser_key": "TEXT NOT NULL DEFAULT ''",
+            "parser_version": "TEXT NOT NULL DEFAULT ''",
+            "source_kind": "TEXT NOT NULL DEFAULT 'physical'",
+            "container_path": "TEXT NOT NULL DEFAULT ''",
+            "member_path": "TEXT NOT NULL DEFAULT ''",
+            "source_ref_json": "TEXT NOT NULL DEFAULT ''",
+            "parent_document_id": "TEXT NOT NULL DEFAULT ''",
+            "freshness_status": "TEXT NOT NULL DEFAULT 'current'",
+        }
+        for name, declaration in additive_document_columns.items():
+            if name not in document_columns:
+                connection.execute(f"ALTER TABLE documents ADD COLUMN {name} {declaration}")
+        for table in ("pages", "passages"):
+            columns = {
+                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "locator_json" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN locator_json TEXT NOT NULL DEFAULT ''"
+                )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS documents_source_kind ON documents(source_kind)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS documents_container_path ON documents(container_path)"
+        )
 
     def _source_path(self, relative_path: str) -> Path:
         path = (self.raw / relative_path).resolve()
         if path != self.raw and self.raw not in path.parents:
             raise ValueError("Source path escapes the workspace")
         return path
+
+    def _archive_policy(self) -> ArchivePolicy:
+        policy = self.workspace.archive_policy
+        return ArchivePolicy(
+            max_members=policy.max_entries,
+            max_member_bytes=policy.max_member_bytes,
+            max_total_bytes=policy.max_total_bytes,
+            max_compression_ratio=policy.max_compression_ratio,
+            max_nested_archives=policy.nested_zip_depth,
+            cache_ttl_seconds=policy.materialized_cache_ttl_hours * 60 * 60,
+            cache_max_bytes=policy.materialized_cache_max_bytes,
+        )
+
+    def _member_cache_root(self) -> Path:
+        return self.storage / "member-cache"
+
+    def _affected_task_ids(
+        self,
+        document_id: str,
+        paths: Sequence[str],
+    ) -> list[str]:
+        """Find task packages that reference a changed physical or virtual path."""
+        task_directory = workspace_tasks_path(self.workspace.workspace_id)
+        if not task_directory.is_dir():
+            return []
+        normalized_paths = {
+            value.replace("\\", "/").casefold().strip("/")
+            for value in paths
+            if value
+        }
+        affected: set[str] = set()
+        for task_path_value in task_directory.glob("*.json"):
+            payload = load_json(task_path_value, {})
+            if not isinstance(payload, dict):
+                continue
+            raw_items = payload.get("items", [])
+            if not isinstance(raw_items, list):
+                continue
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                if document_id and str(raw_item.get("document_id", "")) == document_id:
+                    affected.add(str(payload.get("task_id") or task_path_value.stem))
+                    break
+                item_path = str(raw_item.get("relative_path", ""))
+                source_ref = raw_item.get("source_ref")
+                if isinstance(source_ref, dict):
+                    item_path = str(source_ref.get("virtual_path") or item_path)
+                if item_path.replace("\\", "/").casefold().strip("/") in normalized_paths:
+                    affected.add(str(payload.get("task_id") or task_path_value.stem))
+                    break
+        return sorted(affected)
+
+    def _record_change(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        kind: Literal["added", "modified", "moved", "deleted", "parser_warning"],
+        document_id: str = "",
+        name: str = "",
+        relative_path: str = "",
+        previous_path: str = "",
+        message: str = "",
+    ) -> None:
+        paths = [relative_path, previous_path]
+        affected = self._affected_task_ids(document_id, paths)
+        connection.execute(
+            "INSERT INTO change_events("
+            "change_id, kind, document_id, name, relative_path, previous_path, "
+            "occurred_at, message, affected_task_ids_json, acknowledged) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            (
+                uuid.uuid4().hex,
+                kind,
+                document_id,
+                name,
+                relative_path,
+                previous_path,
+                utc_now(),
+                message[:500],
+                json.dumps(affected, ensure_ascii=False),
+            ),
+        )
+
+    def _source_uri(self, row: sqlite3.Row) -> str:
+        source_ref = _source_ref_from_row(row)
+        relative = (
+            source_ref.container_path
+            if source_ref.source_kind == "archive_member" and source_ref.container_path
+            else str(row["relative_path"])
+        )
+        try:
+            return self._source_path(relative).as_uri()
+        except ValueError:
+            return ""
+
+    @staticmethod
+    def _archive_document_id(
+        workspace_id: str,
+        source_ref: SourceRef,
+        container_id: str = "",
+    ) -> str:
+        identity = "\x00".join(
+            [
+                workspace_id,
+                container_id or source_ref.container_path,
+                "/".join(source_ref.member_chain),
+                ",".join(str(item) for item in source_ref.member_indexes),
+            ]
+        )
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
+
+    def _archive_extracted(
+        self,
+        candidate: ArchiveCandidate,
+    ) -> ExtractedSource:
+        if candidate.materialized_path is None or not candidate.materialized_path.is_file():
+            return ExtractedSource(
+                title=Path(candidate.display_name).stem,
+                pages=[],
+                page_count=0,
+                status="metadata_only",
+                error=candidate.error_code,
+                quality_flags=sorted(set(candidate.quality_flags)),
+                error_code=candidate.error_code,
+                parser_key="v2.archive_member",
+                parser_version="1",
+            )
+        extracted = extract_source(candidate.materialized_path)
+        flags = sorted(set([*extracted.quality_flags, *candidate.quality_flags]))
+        error_code = extracted.error_code or candidate.error_code
+        return replace(
+            extracted,
+            quality_flags=flags,
+            error_code=error_code,
+        )
+
+    def _sync_archive_members(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        path: Path,
+        relative: str,
+        container_id: str,
+        container_hash: str,
+        outer_stat: os.stat_result,
+        existing: dict[str, sqlite3.Row],
+        seen: set[str],
+        report_progress: Callable[..., None],
+        force_document_ids: set[str],
+    ) -> tuple[int, int]:
+        if not self.workspace.archive_policy.enabled:
+            return 0, 0
+        cache_root = self._member_cache_root()
+        scan = scan_archive(
+            path,
+            root_relative=relative,
+            cache_root=cache_root,
+            policy=self._archive_policy(),
+        )
+        if scan.quality_flags or scan.error_code:
+            connection.execute(
+                "UPDATE documents SET quality_flags_json = ?, error_code = ?, "
+                "error = ? WHERE document_id = ?",
+                (
+                    json.dumps(
+                        sorted(set(["archive_container", *scan.quality_flags])), ensure_ascii=False
+                    ),
+                    scan.error_code,
+                    scan.error[:500],
+                    container_id,
+                ),
+            )
+            self._record_change(
+                connection,
+                kind="parser_warning",
+                document_id=container_id,
+                name=path.name,
+                relative_path=relative,
+                message=scan.error_code or ", ".join(scan.quality_flags),
+            )
+        if scan.error_code and not scan.members:
+            # Keep the last usable member index. It is stale, but deleting it would
+            # make a transiently corrupt/syncing archive look like data loss.
+            for old_path, old_row in existing.items():
+                if str(old_row["container_path"] or "") == relative:
+                    seen.add(old_path)
+                    connection.execute(
+                        "UPDATE documents SET freshness_status = 'stale' WHERE document_id = ?",
+                        (str(old_row["document_id"]),),
+                    )
+            return 0, len(scan.members)
+
+        indexed = 0
+        failed = 0
+        for member_number, candidate in enumerate(scan.members, start=1):
+            virtual_path = candidate.virtual_path
+            seen.add(virtual_path)
+            report_progress(
+                current_archive=relative,
+                current_member=virtual_path,
+                member_processed=member_number,
+                member_total=len(scan.members),
+            )
+            current = existing.get(virtual_path)
+            content_hash = (
+                candidate.content_hash
+                or hashlib.sha256(
+                    f"{container_hash}:{virtual_path}:{candidate.size_bytes}".encode()
+                ).hexdigest()
+            )
+            parser_key, parser_version = (
+                parser_signature(candidate.materialized_path)
+                if candidate.materialized_path is not None
+                else ("v2.archive_member", "1")
+            )
+            if (
+                current is not None
+                and str(current["document_id"]) not in force_document_ids
+                and str(current["content_hash"]) == content_hash
+                and str(current["parser_key"]) == parser_key
+                and str(current["parser_version"]) == parser_version
+                and str(current["indexing_state"]) != "failed"
+            ):
+                continue
+            document_id = str(current["document_id"]) if current is not None else ""
+            moved_row: sqlite3.Row | None = None
+            if not document_id:
+                candidate_chain = tuple(candidate.source_ref.member_chain)
+                candidate_indexes = tuple(candidate.source_ref.member_indexes)
+                matches = []
+                for row in existing.values():
+                    if str(row["parent_document_id"] or "") != container_id:
+                        continue
+                    if str(row["content_hash"]) != content_hash:
+                        continue
+                    old_ref = _source_ref_from_row(row)
+                    if (
+                        tuple(old_ref.member_chain) == candidate_chain
+                        and tuple(old_ref.member_indexes) == candidate_indexes
+                    ):
+                        matches.append(row)
+                moved_row = matches[0] if len(matches) == 1 else None
+                document_id = (
+                    self._archive_document_id(
+                        self.workspace.workspace_id,
+                        candidate.source_ref,
+                        container_id,
+                    )
+                    if moved_row is None
+                    else str(moved_row["document_id"])
+                )
+            source_ref = candidate.source_ref.model_copy(update={"stable_id": document_id})
+            extracted = self._archive_extracted(candidate)
+            try:
+                connection.execute("SAVEPOINT replace_archive_member")
+                self._replace_document(
+                    connection,
+                    document_id=document_id,
+                    relative_path=virtual_path,
+                    path=candidate.materialized_path or path,
+                    name=candidate.display_name,
+                    extension=candidate.extension,
+                    content_hash=content_hash,
+                    size_bytes=candidate.size_bytes,
+                    mtime_ns=outer_stat.st_mtime_ns,
+                    modified_at=candidate.modified_at,
+                    extracted=extracted,
+                    source_ref=source_ref,
+                    parent_document_id=container_id,
+                )
+                connection.execute("RELEASE SAVEPOINT replace_archive_member")
+                if moved_row is not None:
+                    self._record_change(
+                        connection,
+                        kind="moved",
+                        document_id=document_id,
+                        name=candidate.display_name,
+                        relative_path=virtual_path,
+                        previous_path=str(moved_row["relative_path"]),
+                    )
+                elif current is None:
+                    self._record_change(
+                        connection,
+                        kind="added",
+                        document_id=document_id,
+                        name=candidate.display_name,
+                        relative_path=virtual_path,
+                    )
+                else:
+                    self._record_change(
+                        connection,
+                        kind="modified",
+                        document_id=document_id,
+                        name=candidate.display_name,
+                        relative_path=virtual_path,
+                    )
+                indexed += 1
+            except Exception as error:
+                try:
+                    connection.execute("ROLLBACK TO SAVEPOINT replace_archive_member")
+                    connection.execute("RELEASE SAVEPOINT replace_archive_member")
+                except sqlite3.OperationalError:
+                    pass
+                self._replace_failed_document(
+                    connection,
+                    document_id=document_id,
+                    relative_path=virtual_path,
+                    path=candidate.materialized_path or path,
+                    name=candidate.display_name,
+                    extension=candidate.extension,
+                    content_hash=content_hash,
+                    size_bytes=candidate.size_bytes,
+                    mtime_ns=outer_stat.st_mtime_ns,
+                    modified_at=candidate.modified_at,
+                    error=error,
+                    source_ref=source_ref,
+                    parent_document_id=container_id,
+                )
+                self._record_change(
+                    connection,
+                    kind="parser_warning",
+                    document_id=document_id,
+                    name=candidate.display_name,
+                    relative_path=virtual_path,
+                    message=f"{type(error).__name__}: {error}",
+                )
+                failed += 1
+        return indexed, failed
 
     def sync(
         self,
@@ -859,23 +1744,46 @@ class WorkspaceStore:
                 str(row["relative_path"]): row
                 for row in connection.execute("SELECT * FROM documents").fetchall()
             }
-            movable_by_hash: dict[str, list[sqlite3.Row]] = {}
+            movable_by_identity: dict[tuple[str, str], list[sqlite3.Row]] = {}
             for relative_path, row in existing.items():
-                if relative_path not in discovered_paths:
-                    movable_by_hash.setdefault(str(row["content_hash"]), []).append(row)
+                source_kind = str(_row_value(row, "source_kind", "physical") or "physical")
+                if (
+                    relative_path not in discovered_paths
+                    and source_kind in {"physical", "archive"}
+                    and not str(_row_value(row, "parent_document_id", "") or "")
+                ):
+                    movable_by_identity.setdefault(
+                        (source_kind, str(row["content_hash"])), []
+                    ).append(row)
             for path in files:
                 relative = path.relative_to(self.raw).as_posix()
                 report_progress(clear_page_progress=True, current_file=relative)
                 seen.add(relative)
-                stat = path.stat()
+                stat, content_hash = _stable_snapshot(
+                    path,
+                    attempts=max(1, self.workspace.sync_policy.stable_retry_count),
+                )
                 current = existing.get(relative)
+                expected_parser_key, expected_parser_version = parser_signature(path)
                 if (
                     current is not None
                     and str(current["document_id"]) not in forced
                     and str(current["indexing_state"]) != "failed"
                     and int(current["size_bytes"]) == stat.st_size
                     and int(current["mtime_ns"]) == stat.st_mtime_ns
+                    and str(current["content_hash"]) == content_hash
+                    and str(current["parser_key"]) == expected_parser_key
+                    and str(current["parser_version"]) == expected_parser_version
                 ):
+                    if path.suffix.casefold() == ".zip" and self.workspace.archive_policy.enabled:
+                        for member_path, member_row in existing.items():
+                            if (
+                                str(_row_value(member_row, "source_kind", ""))
+                                == "archive_member"
+                                and str(_row_value(member_row, "container_path", ""))
+                                == relative
+                            ):
+                                seen.add(member_path)
                     unchanged += 1
                     processed += 1
                     report_progress(
@@ -885,18 +1793,37 @@ class WorkspaceStore:
                         failed=failed,
                     )
                     continue
-                content_hash = sha256_file(path)
                 document_id = str(current["document_id"]) if current else ""
+                moved_row: sqlite3.Row | None = None
                 if not document_id:
-                    moved_candidates = movable_by_hash.get(content_hash, [])
-                    moved = moved_candidates.pop(0) if moved_candidates else None
-                    document_id = str(moved["document_id"]) if moved else str(uuid.uuid4())
+                    source_kind = "archive" if path.suffix.casefold() == ".zip" else "physical"
+                    moved_candidates = movable_by_identity.get((source_kind, content_hash), [])
+                    moved_row = moved_candidates.pop(0) if moved_candidates else None
+                    document_id = (
+                        str(moved_row["document_id"])
+                        if moved_row is not None
+                        else str(uuid.uuid4())
+                    )
                 try:
                     progress_token = _EXTRACTION_PROGRESS_CALLBACK.set(
                         lambda update: report_progress(**update)
                     )
                     try:
                         extracted = extract_source(path)
+                        source_ref = physical_source_ref(
+                            relative,
+                            archive=path.suffix.casefold() == ".zip",
+                        )
+                        if path.suffix.casefold() == ".zip":
+                            extracted = ExtractedSource(
+                                title=path.stem,
+                                pages=[],
+                                page_count=0,
+                                status="metadata_only",
+                                quality_flags=["archive_container"],
+                                parser_key="v2.archive",
+                                parser_version="1",
+                            )
                     finally:
                         _EXTRACTION_PROGRESS_CALLBACK.reset(progress_token)
                     connection.execute("SAVEPOINT replace_document")
@@ -905,14 +1832,57 @@ class WorkspaceStore:
                         document_id=document_id,
                         relative_path=relative,
                         path=path,
+                        name=path.name,
+                        extension=path.suffix.casefold(),
                         content_hash=content_hash,
                         size_bytes=stat.st_size,
                         mtime_ns=stat.st_mtime_ns,
                         modified_at=_modified_at(stat),
                         extracted=extracted,
+                        source_ref=source_ref,
                     )
                     connection.execute("RELEASE SAVEPOINT replace_document")
                     indexed += 1
+                    if moved_row is not None:
+                        self._record_change(
+                            connection,
+                            kind="moved",
+                            document_id=document_id,
+                            name=path.name,
+                            relative_path=relative,
+                            previous_path=str(moved_row["relative_path"]),
+                        )
+                    elif current is None:
+                        self._record_change(
+                            connection,
+                            kind="added",
+                            document_id=document_id,
+                            name=path.name,
+                            relative_path=relative,
+                        )
+                    else:
+                        self._record_change(
+                            connection,
+                            kind="modified",
+                            document_id=document_id,
+                            name=path.name,
+                            relative_path=relative,
+                        )
+                    if path.suffix.casefold() == ".zip":
+                        member_indexed, member_failed = self._sync_archive_members(
+                            connection,
+                            path=path,
+                            relative=relative,
+                            container_id=document_id,
+                            container_hash=content_hash,
+                            outer_stat=stat,
+                            existing=existing,
+                            seen=seen,
+                            report_progress=report_progress,
+                            force_document_ids=forced,
+                        )
+                        indexed += member_indexed
+                        failed += member_failed
                 except Exception as error:
                     try:
                         connection.execute("ROLLBACK TO SAVEPOINT replace_document")
@@ -924,11 +1894,25 @@ class WorkspaceStore:
                         document_id=document_id,
                         relative_path=relative,
                         path=path,
+                        name=path.name,
+                        extension=path.suffix.casefold(),
                         content_hash=content_hash,
                         size_bytes=stat.st_size,
                         mtime_ns=stat.st_mtime_ns,
                         modified_at=_modified_at(stat),
                         error=error,
+                        source_ref=physical_source_ref(
+                            relative,
+                            archive=path.suffix.casefold() == ".zip",
+                        ),
+                    )
+                    self._record_change(
+                        connection,
+                        kind="parser_warning",
+                        document_id=document_id,
+                        name=path.name,
+                        relative_path=relative,
+                        message=f"{type(error).__name__}: {error}",
                     )
                     failed += 1
                 processed += 1
@@ -947,6 +1931,13 @@ class WorkspaceStore:
                 ).fetchone()
                 if current_path is not None and str(current_path["relative_path"]) != relative:
                     continue
+                self._record_change(
+                    connection,
+                    kind="deleted",
+                    document_id=document_id,
+                    name=str(existing[relative]["name"]),
+                    relative_path=relative,
+                )
                 self._delete_document(connection, document_id)
             now = utc_now()
             connection.execute(
@@ -987,11 +1978,15 @@ class WorkspaceStore:
         document_id: str,
         relative_path: str,
         path: Path,
+        name: str,
+        extension: str,
         content_hash: str,
         size_bytes: int,
         mtime_ns: int,
         modified_at: str,
         extracted: ExtractedSource,
+        source_ref: SourceRef,
+        parent_document_id: str = "",
     ) -> None:
         if connection.execute(
             "SELECT 1 FROM documents WHERE document_id = ?", (document_id,)
@@ -1008,39 +2003,67 @@ class WorkspaceStore:
         overview = ""
         if extracted.pages and len(readable_pages) / len(extracted.pages) >= 0.70:
             overview = _excerpt(readable_pages[0].text, "", 260)
+        stable_source_ref = source_ref.model_copy(update={"stable_id": document_id})
+        parser_key = extracted.parser_key or parser_signature(path)[0]
+        parser_version = extracted.parser_version or parser_signature(path)[1]
+        title = extracted.title
+        if source_ref.source_kind == "archive_member" and title == path.stem:
+            title = Path(name).stem
         connection.execute(
             """
             INSERT INTO documents(
                 document_id, relative_path, name, extension, content_hash, size_bytes, mtime_ns,
                 modified_at, title, overview, page_count, readability, readability_score,
-                indexing_state, error, indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                indexing_state, error, quality_flags_json, error_code, parser_key, parser_version,
+                source_kind, container_path, member_path, source_ref_json, parent_document_id,
+                freshness_status, indexed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?)
             """,
             (
                 document_id,
                 relative_path,
-                path.name,
-                path.suffix.casefold(),
+                name,
+                extension,
                 content_hash,
                 size_bytes,
                 mtime_ns,
                 modified_at,
-                extracted.title,
+                title,
                 overview,
                 extracted.page_count,
                 readability,
                 round(document_score, 4),
                 extracted.status,
                 extracted.error,
+                json.dumps(sorted(set(extracted.quality_flags)), ensure_ascii=False),
+                extracted.error_code,
+                parser_key,
+                parser_version,
+                source_ref.source_kind,
+                source_ref.container_path,
+                source_ref.member_path,
+                _source_ref_json(stable_source_ref),
+                parent_document_id,
+                "current",
                 utc_now(),
             ),
         )
         for page in extracted.pages:
+            locator = page.locator
+            if locator is None and page.page_number is not None:
+                locator = EvidenceLocator(kind="page", page_number=page.page_number)
+            locator_json = (
+                json.dumps(locator.model_dump(mode="json"), ensure_ascii=False)
+                if locator is not None
+                else ""
+            )
             connection.execute(
                 "INSERT INTO pages("
-                "document_id, page_number, text, extraction_method, quality_score, readability"
+                "document_id, page_number, text, extraction_method, quality_score, readability, "
+                "locator_json"
                 ") "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     document_id,
                     page.page_number,
@@ -1048,18 +2071,20 @@ class WorkspaceStore:
                     page.extraction_method,
                     page.quality_score,
                     page.readability,
+                    locator_json,
                 ),
             )
             if page.quality_score < PARTIAL_THRESHOLD or not page.text.strip():
                 continue
-            heading = next(
-                (line.strip() for line in page.text.splitlines() if line.strip()), ""
-            )[:200]
+            heading = next((line.strip() for line in page.text.splitlines() if line.strip()), "")[
+                :200
+            ]
             for ordinal, chunk in enumerate(_passage_chunks(page.text)):
                 passage = connection.execute(
-                    "INSERT INTO passages(document_id, page_number, ordinal, heading, text) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (document_id, page.page_number, ordinal, heading, chunk),
+                    "INSERT INTO passages("
+                    "document_id, page_number, ordinal, heading, text, locator_json"
+                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    (document_id, page.page_number, ordinal, heading, chunk, locator_json),
                 )
                 if passage.lastrowid is None:
                     raise RuntimeError("Unable to allocate passage ID")
@@ -1072,7 +2097,7 @@ class WorkspaceStore:
                         passage_id,
                         document_id,
                         page.page_number,
-                        path.name,
+                        name,
                         relative_path,
                         heading,
                         chunk,
@@ -1087,35 +2112,51 @@ class WorkspaceStore:
         document_id: str,
         relative_path: str,
         path: Path,
+        name: str,
+        extension: str,
         content_hash: str,
         size_bytes: int,
         mtime_ns: int,
         modified_at: str,
         error: Exception,
+        source_ref: SourceRef,
+        parent_document_id: str = "",
     ) -> None:
         if connection.execute(
             "SELECT 1 FROM documents WHERE document_id = ?", (document_id,)
         ).fetchone():
             self._delete_document(connection, document_id)
+        parser_key, parser_version = parser_signature(path)
+        stable_source_ref = source_ref.model_copy(update={"stable_id": document_id})
         connection.execute(
             """
             INSERT INTO documents(
                 document_id, relative_path, name, extension, content_hash, size_bytes, mtime_ns,
                 modified_at, title, overview, page_count, readability, readability_score,
-                indexing_state, error, indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 'low', 0, 'failed', ?, ?)
+                indexing_state, error, quality_flags_json, error_code, parser_key, parser_version,
+                source_kind, container_path, member_path, source_ref_json, parent_document_id,
+                freshness_status, indexed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 'low', 0, 'failed', ?, '[]',
+                      'parser_failed', ?, ?, ?, ?, ?, ?, ?, 'current', ?)
             """,
             (
                 document_id,
                 relative_path,
-                path.name,
-                path.suffix.casefold(),
+                name,
+                extension,
                 content_hash,
                 size_bytes,
                 mtime_ns,
                 modified_at,
-                path.stem,
+                Path(name).stem,
                 f"{type(error).__name__}: {error}"[:500],
+                parser_key,
+                parser_version,
+                source_ref.source_kind,
+                source_ref.container_path,
+                source_ref.member_path,
+                _source_ref_json(stable_source_ref),
+                parent_document_id,
                 utc_now(),
             ),
         )
@@ -1124,9 +2165,7 @@ class WorkspaceStore:
         if not self.database.exists():
             return WorkspaceHealth()
         with closing(self._connect()) as connection:
-            document_count = int(
-                connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-            )
+            document_count = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
             counts = {
                 str(row["readability"]): int(row["count"])
                 for row in connection.execute(
@@ -1189,8 +2228,122 @@ class WorkspaceStore:
             raise FileNotFoundError("Document not found")
         return self._document_payload(row)
 
-    def _document_payload(self, row: sqlite3.Row) -> WorkspaceDocument:
+    def list_members(self, container_document_id: str) -> list[WorkspaceDocument]:
+        with closing(self._connect()) as connection:
+            container = connection.execute(
+                "SELECT relative_path FROM documents WHERE document_id = ?",
+                (container_document_id,),
+            ).fetchone()
+            if container is None:
+                raise FileNotFoundError("Document not found")
+            rows = connection.execute(
+                "SELECT * FROM documents WHERE source_kind = 'archive_member' "
+                "AND (parent_document_id = ? OR container_path = ?) "
+                "ORDER BY relative_path COLLATE NOCASE",
+                (container_document_id, str(container["relative_path"])),
+            ).fetchall()
+        return [self._document_payload(row) for row in rows]
+
+    def list_changes(
+        self,
+        *,
+        limit: int = 100,
+        since: str = "",
+        include_acknowledged: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return recent source changes without loading the whole index into Python."""
+        bounded_limit = max(1, min(int(limit), 1_000))
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if since.strip():
+            clauses.append("occurred_at > ?")
+            parameters.append(since.strip())
+        if not include_acknowledged:
+            clauses.append("acknowledged = 0")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT change_id, kind, document_id, name, relative_path, "
+                "previous_path, occurred_at, message, affected_task_ids_json, acknowledged "
+                f"FROM change_events {where} ORDER BY occurred_at DESC LIMIT ?",
+                [*parameters, bounded_limit],
+            ).fetchall()
+        changes: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                affected = json.loads(str(row["affected_task_ids_json"] or "[]"))
+            except (TypeError, ValueError):
+                affected = []
+            changes.append(
+                {
+                    "change_id": str(row["change_id"]),
+                    "kind": str(row["kind"]),
+                    "document_id": str(row["document_id"]),
+                    "name": str(row["name"]),
+                    "relative_path": str(row["relative_path"]),
+                    "previous_path": str(row["previous_path"]),
+                    "occurred_at": str(row["occurred_at"]),
+                    "message": str(row["message"]),
+                    "affected_task_ids": (
+                        [str(item) for item in affected]
+                        if isinstance(affected, list)
+                        else []
+                    ),
+                    "acknowledged": bool(row["acknowledged"]),
+                }
+            )
+        return changes
+
+    def content_path(self, document_id: str) -> Path:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM documents WHERE document_id = ?", (document_id,)
+            ).fetchone()
+        if row is None:
+            raise FileNotFoundError("Document not found")
+        source_ref = _source_ref_from_row(row)
+        if source_ref.source_kind == "archive_member":
+            return materialize_source_ref(
+                self.raw,
+                source_ref,
+                cache_root=self._member_cache_root(),
+                expected_hash=str(row["content_hash"]),
+                policy=self._archive_policy(),
+            )
         source = self._source_path(str(row["relative_path"]))
+        if not source.is_file():
+            raise FileNotFoundError("Source file is unavailable")
+        return source
+
+    def content_bytes(self, document_id: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes:
+        path = self.content_path(document_id)
+        if path.stat().st_size > max_bytes:
+            raise ValueError("Document exceeds the content preview limit")
+        return path.read_bytes()
+
+    def materialize_document(self, document_id: str) -> Path:
+        return self.content_path(document_id)
+
+    def open_target(self, document_id: str) -> dict[str, Any]:
+        path = self.content_path(document_id)
+        document = self.get_document(document_id)
+        temporary = bool(
+            document.source_ref and document.source_ref.source_kind == "archive_member"
+        )
+        expires_at = cache_expiry(path, self._archive_policy()) if temporary else ""
+        return {
+            "uri": path.resolve().as_uri(),
+            "temporary": temporary,
+            "expires_at": expires_at,
+            "display_name": document.name,
+            "source_ref": document.source_ref.model_dump(mode="json")
+            if document.source_ref
+            else None,
+        }
+
+    def _document_payload(self, row: sqlite3.Row) -> WorkspaceDocument:
+        source_ref = _source_ref_from_row(row)
+        source_uri = self._source_uri(row)
         return WorkspaceDocument(
             document_id=str(row["document_id"]),
             name=str(row["name"]),
@@ -1206,7 +2359,16 @@ class WorkspaceStore:
             readability_score=float(row["readability_score"]),
             indexing_state=_indexing_state_value(row["indexing_state"]),
             error=str(row["error"]),
-            source_uri=source.as_uri(),
+            source_uri=source_uri,
+            source_ref=source_ref,
+            locator=_locator_from_json(_row_value(row, "locator_json")),
+            quality_flags=_quality_flags(_row_value(row, "quality_flags_json", "[]")),
+            error_code=str(_row_value(row, "error_code")),
+            parser_key=str(_row_value(row, "parser_key")),
+            parser_version=str(_row_value(row, "parser_version")),
+            freshness_status=_freshness_from_value(
+                _row_value(row, "freshness_status", "current")
+            ),
         )
 
     def search(
@@ -1216,7 +2378,13 @@ class WorkspaceStore:
         limit: int = 30,
         mode: Literal["local", "assisted"] = "local",
         path_prefix: str = "",
-        extensions: list[str] | None = None,
+        extensions: Sequence[str] | None = None,
+        readability: Sequence[str] | None = None,
+        indexing_states: Sequence[str] | None = None,
+        source_kinds: Sequence[str] | None = None,
+        modified_from: str = "",
+        modified_to: str = "",
+        task_id: str = "",
     ) -> WorkspaceSearchReport:
         started = time.perf_counter()
         value = query.strip()
@@ -1226,16 +2394,123 @@ class WorkspaceStore:
         if not normalized_query:
             raise ValueError("Search query must contain searchable text")
         with closing(self._connect()) as connection:
-            rows = connection.execute("SELECT * FROM documents").fetchall()
+            allowed_extensions = {item.casefold() for item in (extensions or [])}
+            allowed_readability = {item.casefold() for item in (readability or [])}
+            allowed_states = {item.casefold() for item in (indexing_states or [])}
+            allowed_kinds = {item.casefold() for item in (source_kinds or [])}
+            task_document_ids: set[str] | None = None
+            if task_id:
+                try:
+                    normalized_task_id = str(uuid.UUID(task_id))
+                except ValueError as error:
+                    raise ValueError("task_id must be a valid UUID") from error
+                task_document_ids = set()
+                task_path_value = (
+                    workspace_tasks_path(self.workspace.workspace_id)
+                    / f"{normalized_task_id}.json"
+                )
+                task_payload = load_json(task_path_value, {})
+                raw_items = task_payload.get("items", []) if isinstance(task_payload, dict) else []
+                for item in raw_items if isinstance(raw_items, list) else []:
+                    if isinstance(item, dict) and item.get("document_id"):
+                        task_document_ids.add(str(item["document_id"]))
+
+            filters: list[str] = []
+            filter_parameters: list[object] = []
+
+            def add_values_filter(column: str, values: set[str]) -> None:
+                if not values:
+                    return
+                placeholders = ", ".join("?" for _ in values)
+                filters.append(f"{column} IN ({placeholders})")
+                filter_parameters.extend(sorted(values))
+
+            if path_prefix:
+                escaped_prefix = (
+                    path_prefix.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                filters.append("documents.relative_path LIKE ? ESCAPE '\\'")
+                filter_parameters.append(f"{escaped_prefix}%")
+            add_values_filter("documents.extension", allowed_extensions)
+            add_values_filter("documents.readability", allowed_readability)
+            add_values_filter("documents.indexing_state", allowed_states)
+            add_values_filter("documents.source_kind", allowed_kinds)
+            if modified_from:
+                filters.append("documents.modified_at >= ?")
+                filter_parameters.append(modified_from)
+            if modified_to:
+                filters.append("documents.modified_at <= ?")
+                filter_parameters.append(modified_to)
+            if task_document_ids is not None:
+                filters.append(
+                    "documents.document_id IN (SELECT value FROM json_each(?))"
+                )
+                filter_parameters.append(json.dumps(sorted(task_document_ids)))
+            filter_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+            document_count = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM documents {filter_sql}",
+                    filter_parameters,
+                ).fetchone()[0]
+            )
+            metadata_sql = f"SELECT documents.* FROM documents {filter_sql}"
+            metadata_parameters = list(filter_parameters)
+            if document_count > 10_000:
+                metadata_terms = normalized_query.split()
+                metadata_clauses: list[str] = []
+                metadata_values: list[object] = []
+                for column in (
+                    "documents.name",
+                    "documents.title",
+                    "documents.relative_path",
+                ):
+                    term_clauses = []
+                    for term in metadata_terms:
+                        escaped = (
+                            term.replace("\\", "\\\\")
+                            .replace("%", "\\%")
+                            .replace("_", "\\_")
+                        )
+                        term_clauses.append(f"{column} LIKE ? ESCAPE '\\'")
+                        metadata_values.append(f"%{escaped}%")
+                    metadata_clauses.append(f"({' AND '.join(term_clauses)})")
+                conjunction = " AND " if filters else " WHERE "
+                metadata_sql += conjunction + f"({' OR '.join(metadata_clauses)})"
+                metadata_sql += " ORDER BY relative_path COLLATE NOCASE LIMIT 2000"
+                metadata_parameters.extend(metadata_values)
+            rows = connection.execute(metadata_sql, metadata_parameters).fetchall()
             documents = {str(row["document_id"]): row for row in rows}
             candidates: dict[str, tuple[int, float, list[WorkspaceEvidence]]] = {}
-            allowed_extensions = {item.casefold() for item in (extensions or [])}
-            for document_id, row in documents.items():
+
+            def allowed(row: sqlite3.Row) -> bool:
                 relative_path = str(row["relative_path"])
                 extension = str(row["extension"])
                 if path_prefix and not relative_path.casefold().startswith(path_prefix.casefold()):
-                    continue
+                    return False
                 if allowed_extensions and extension not in allowed_extensions:
+                    return False
+                if (
+                    allowed_readability
+                    and str(row["readability"]).casefold() not in allowed_readability
+                ):
+                    return False
+                if allowed_states and str(row["indexing_state"]).casefold() not in allowed_states:
+                    return False
+                row_kind = str(_row_value(row, "source_kind", "physical") or "physical")
+                if allowed_kinds and row_kind.casefold() not in allowed_kinds:
+                    return False
+                modified_at = str(row["modified_at"])
+                if modified_from and modified_at < modified_from:
+                    return False
+                if modified_to and modified_at > modified_to:
+                    return False
+                return task_document_ids is None or str(row["document_id"]) in task_document_ids
+
+            for document_id, row in documents.items():
+                relative_path = str(row["relative_path"])
+                if not allowed(row):
                     continue
                 filename = normalize_search_text(str(row["name"]))
                 stem = normalize_search_text(Path(str(row["name"])).stem)
@@ -1256,9 +2531,10 @@ class WorkspaceStore:
                         if position == 0
                         else 1.0 + (position / 1_000.0) + length_penalty
                     )
-                elif normalized_query and SequenceMatcher(
-                    None, normalized_query, stem
-                ).ratio() >= 0.72:
+                elif (
+                    normalized_query
+                    and SequenceMatcher(None, normalized_query, stem).ratio() >= 0.72
+                ):
                     tier, reason = 1, "文件名与查询内容相近"
                     metadata_score = 2.0 + (
                         1.0 - SequenceMatcher(None, normalized_query, stem).ratio()
@@ -1272,6 +2548,7 @@ class WorkspaceStore:
                 if tier is not None:
                     evidence = WorkspaceEvidence(
                         page_number=None,
+                        locator=_locator_from_json(_row_value(row, "locator_json")),
                         excerpt=str(row["overview"]) or str(row["name"]),
                         reason=reason,
                         quality_score=float(row["readability_score"]),
@@ -1280,8 +2557,7 @@ class WorkspaceStore:
             tokens = search_terms(value)
             if tokens:
                 quoted_primary = [
-                    f'"{term.replace(chr(34), chr(34) * 2)}"'
-                    for term in normalized_query.split()
+                    f'"{term.replace(chr(34), chr(34) * 2)}"' for term in normalized_query.split()
                 ]
                 fallback_expression = " OR ".join(
                     f'"{term.replace(chr(34), chr(34) * 2)}"' for term in tokens
@@ -1290,14 +2566,22 @@ class WorkspaceStore:
                 if fallback_expression not in expressions:
                     expressions.append(fallback_expression)
                 matches: list[sqlite3.Row] = []
+                passage_filter_sql = (
+                    f"AND {' AND '.join(filters)} " if filters else ""
+                )
                 for expression in expressions:
                     try:
                         matches = connection.execute(
-                            "SELECT rowid, document_id, page_number, heading, body, "
+                            "SELECT passages_fts.rowid, passages_fts.document_id, "
+                            "passages_fts.page_number, "
+                            "passages_fts.heading, passages_fts.body, passages.locator_json, "
                             "bm25(passages_fts) AS score "
-                            "FROM passages_fts WHERE passages_fts MATCH ? "
-                            "ORDER BY score LIMIT 250",
-                            (expression,),
+                            "FROM passages_fts JOIN passages "
+                            "ON passages.passage_id = passages_fts.rowid "
+                            "JOIN documents ON documents.document_id = passages_fts.document_id "
+                            "WHERE passages_fts MATCH ? "
+                            f"{passage_filter_sql}ORDER BY score LIMIT 250",
+                            [expression, *filter_parameters],
                         ).fetchall()
                     except sqlite3.OperationalError:
                         matches = []
@@ -1306,15 +2590,18 @@ class WorkspaceStore:
                 for match in matches:
                     document_id = str(match["document_id"])
                     if document_id not in documents:
-                        continue
+                        lookup_filters = ["documents.document_id = ?", *filters]
+                        row = connection.execute(
+                            "SELECT documents.* FROM documents WHERE "
+                            f"{' AND '.join(lookup_filters)}",
+                            [document_id, *filter_parameters],
+                        ).fetchone()
+                        if row is None:
+                            continue
+                        documents[document_id] = row
                     row = documents[document_id]
                     relative_path = str(row["relative_path"])
-                    extension = str(row["extension"])
-                    if path_prefix and not relative_path.casefold().startswith(
-                        path_prefix.casefold()
-                    ):
-                        continue
-                    if allowed_extensions and extension not in allowed_extensions:
+                    if not allowed(row):
                         continue
                     heading = str(match["heading"])
                     body = str(match["body"])
@@ -1333,11 +2620,10 @@ class WorkspaceStore:
                     reason = "章节标题包含查询内容" if heading_match else "正文包含查询内容"
                     evidence = WorkspaceEvidence(
                         page_number=(
-                            int(match["page_number"])
-                            if match["page_number"] is not None
-                            else None
+                            int(match["page_number"]) if match["page_number"] is not None else None
                         ),
                         heading=heading if heading_match else "",
+                        locator=_locator_from_json(match["locator_json"]),
                         excerpt=_excerpt(body, value),
                         reason=reason,
                         quality_score=float(row["readability_score"]),
@@ -1395,7 +2681,6 @@ class WorkspaceStore:
                         for evidence in unique
                         if evidence is not paged_evidence and evidence.page_number is not None
                     ][:2]
-                source = self._source_path(str(row["relative_path"]))
                 results.append(
                     WorkspaceSearchResult(
                         document_id=document_id,
@@ -1409,7 +2694,18 @@ class WorkspaceStore:
                         readability=_readability_value(row["readability"]),
                         readability_score=float(row["readability_score"]),
                         indexing_state=_indexing_state_value(row["indexing_state"]),
-                        source_uri=source.as_uri(),
+                        source_uri=self._source_uri(row),
+                        source_ref=_source_ref_from_row(row),
+                        locator=best.locator,
+                        quality_flags=_quality_flags(
+                            _row_value(row, "quality_flags_json", "[]")
+                        ),
+                        error_code=str(_row_value(row, "error_code")),
+                        parser_key=str(_row_value(row, "parser_key")),
+                        parser_version=str(_row_value(row, "parser_version")),
+                        freshness_status=_freshness_from_value(
+                            _row_value(row, "freshness_status", "current")
+                        ),
                         overview=str(row["overview"]),
                         best_evidence=best,
                         additional_evidence=additional,
@@ -1419,9 +2715,7 @@ class WorkspaceStore:
         actual_mode: Literal["local", "assisted", "degraded"] = "local"
         degradation_reason = ""
         answer = (
-            f"找到 {len(results)} 份相关资料。"
-            if results
-            else "当前资料空间没有找到匹配内容。"
+            f"找到 {len(results)} 份相关资料。" if results else "当前资料空间没有找到匹配内容。"
         )
         if mode == "assisted":
             try:
@@ -1460,34 +2754,44 @@ class WorkspaceStore:
             raise ValueError("Preview highlight is too long")
         with closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT relative_path, content_hash, extension, page_count FROM documents "
-                "WHERE document_id = ?",
+                "SELECT * FROM documents WHERE document_id = ?",
                 (document_id,),
             ).fetchone()
         if row is None:
             raise FileNotFoundError("Document not found")
-        if str(row["extension"]) != ".pdf":
-            raise ValueError("Page preview is available only for PDF documents")
+        extension = str(row["extension"]).casefold()
+        if extension in IMAGE_EXTENSIONS:
+            source = self.content_path(document_id)
+            destination = self.previews / str(row["content_hash"]) / "image.png"
+            if not destination.exists():
+                from PIL import Image
+
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with Image.open(source) as image:
+                    image.convert("RGB").save(destination, format="PNG", optimize=True)
+            return destination
+        if extension != ".pdf":
+            raise ValueError("Page preview is available only for PDF and image documents")
         if page_number > int(row["page_count"]):
             raise FileNotFoundError("Page not found")
         suffix = ""
         if highlight:
-            digest = hashlib.sha256(
-                normalize_search_text(highlight).encode("utf-8")
-            ).hexdigest()[:16]
+            digest = hashlib.sha256(normalize_search_text(highlight).encode("utf-8")).hexdigest()[
+                :16
+            ]
             suffix = f"-{digest}"
         destination = self.previews / str(row["content_hash"]) / f"{page_number}{suffix}.png"
         if destination.exists():
             return destination
         import pypdfium2 as pdfium
 
-        source = self._source_path(str(row["relative_path"]))
+        source = self.content_path(document_id)
         document = pdfium.PdfDocument(str(source))
         try:
             page = document[page_number - 1]
             bitmap = page.render(scale=1.8)
             try:
-                image = bitmap.to_pil()
+                render_image: Any = bitmap.to_pil()
                 if highlight:
                     from PIL import Image, ImageDraw
 
@@ -1520,9 +2824,9 @@ class WorkspaceStore:
                             if not merged_boxes:
                                 merged_boxes.append((left, bottom, right, top))
                                 continue
-                            current_left, current_bottom, current_right, current_top = (
-                                merged_boxes[-1]
-                            )
+                            current_left, current_bottom, current_right, current_top = merged_boxes[
+                                -1
+                            ]
                             overlap = min(top, current_top) - max(bottom, current_bottom)
                             minimum_height = min(top - bottom, current_top - current_bottom)
                             same_line = overlap >= minimum_height * 0.45
@@ -1537,9 +2841,9 @@ class WorkspaceStore:
                             else:
                                 merged_boxes.append((left, bottom, right, top))
                         page_width, page_height = page.get_size()
-                        scale_x = image.width / page_width
-                        scale_y = image.height / page_height
-                        base = image.convert("RGBA")
+                        scale_x = render_image.width / page_width
+                        scale_y = render_image.height / page_height
+                        base = render_image.convert("RGBA")
                         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
                         draw = ImageDraw.Draw(overlay)
                         for left, bottom, right, top in merged_boxes:
@@ -1554,9 +2858,9 @@ class WorkspaceStore:
                                 outline=(214, 151, 0, 190),
                                 width=1,
                             )
-                        image = Image.alpha_composite(base, overlay).convert("RGB")
+                        render_image = Image.alpha_composite(base, overlay).convert("RGB")
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                image.save(destination, format="PNG", optimize=True)
+                render_image.save(destination, format="PNG", optimize=True)
             finally:
                 bitmap.close()
                 page.close()
@@ -1571,12 +2875,19 @@ class WorkspaceStore:
     ) -> dict[str, Any]:
         with closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT relative_path FROM documents WHERE document_id = ?", (document_id,)
+                "SELECT relative_path, source_kind, parent_document_id "
+                "FROM documents WHERE document_id = ?",
+                (document_id,),
             ).fetchone()
             if row is None:
                 raise FileNotFoundError("Document not found")
             relative_path = str(row["relative_path"])
-        result = self.sync(progress_callback, force_document_ids={document_id})
+            force_ids = {document_id}
+            if str(row["source_kind"] or "") == "archive_member":
+                parent_id = str(row["parent_document_id"] or "")
+                if parent_id:
+                    force_ids.add(parent_id)
+        result = self.sync(progress_callback, force_document_ids=force_ids)
         result["reprocessed_document_id"] = document_id
         result["relative_path"] = relative_path
         return result

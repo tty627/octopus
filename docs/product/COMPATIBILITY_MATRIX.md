@@ -1,6 +1,6 @@
-# Octopus 2.0 兼容矩阵
+# Octopus 2.1 兼容矩阵
 
-本矩阵描述 `2.0.0.dev1` 的实际支持边界。V2 与 V1 在当前版本中并行存在，V2 是默认桌面产品，V1 仅用于回滚和旧 CLI 兼容。
+本矩阵描述 `2.1.0.dev0` 的实际支持边界。V2.1 是默认桌面产品，V1 仅用于回滚和旧 CLI 兼容。
 
 ## 平台
 
@@ -18,19 +18,20 @@
 | --- | --- | --- | --- |
 | PDF | 支持 | 支持，PDFium/PyPDF/本地 OCR | 支持认证 PNG 预览 |
 | TXT、Markdown、CSV、JSON、代码等文本 | 支持 | 支持 | 文本片段 |
-| Word、Excel、PowerPoint | 支持 | `dev1` 暂未接入 | 暂无 |
-| PNG、JPEG 等图片 | 支持 | `dev1` 暂未接入 | 仅在后续视觉流程且明确授权后使用 |
+| Word、Excel、PowerPoint | 支持 | 支持段落、表格、Sheet/单元格、幻灯片和备注 | 结构化定位并打开原文件 |
+| PNG、JPEG、TIFF、WebP、BMP | 支持 | 支持本地 OCR | 原图定位；发送视觉模型仍需明确授权 |
+| ZIP 与一层嵌套 ZIP | 支持容器与成员 | 支持成员中的上述格式 | 使用 `archive.zip!/成员` 虚拟路径 |
 
-未抽取正文的 Office 和图片显示“仅文件信息”，不应显示为处理失败。
+加密、损坏、异常压缩方法或超过安全预算的 ZIP 仅提供元数据和明确警告。解析失败的文件不应伪装成可读正文。
 
 ## V2 契约
 
 | 契约 | 当前版本 | 持久性 | 回退策略 |
 | --- | --- | --- | --- |
-| V2 资料空间/global config | `2.0` | 用户配置 | 保留 V1 repositories 字段，V2 workspaces 独立存储 |
-| V2 SQLite workspace | `2.0` | 可重建缓存 | 删除后从原始资料重新同步 |
-| V2 task | `2.0` | 不可丢失用户数据 | revision 冲突保护；来源变化后标记待重新确认 |
-| Local API V2 | `2.0` | 当前桌面契约 | `/v2/contract` 可认证读取；只增加兼容字段 |
+| V2 资料空间/global config | `2.1` | 用户配置 | 保留 V1 repositories 字段，V2 workspaces 独立存储 |
+| V2 SQLite workspace | `2.1` | 可重建缓存 | 旧缓存后台升级或从原始资料重新同步 |
+| V2 research task | `2.1` | 不可丢失用户数据 | 原子迁移与备份；revision 冲突保护；来源变化后标记待重新确认 |
+| Local API V2 | `2.1` | 当前桌面契约 | `/v2/contract` 可认证读取；保留 2.0 兼容字段 |
 | Local API V1 | `1.0` | 一个版本周期的回滚契约 | 旧 CLI 和 V1 路由继续可用 |
 | V1 Markdown/Leaf/FolderNode | 旧契约 | 只读迁移来源 | 不继续同步，不自动删除 |
 
@@ -46,7 +47,8 @@
 
 ## 升级与回退
 
-- `2.0.0.dev0 -> 2.0.0.dev1`：原地升级支持，任务和缓存位置不变；
+- `2.0.0.dev0 -> 2.0.0.dev1 -> 2.1.0.dev0`：原地升级支持，资料空间、任务和缓存根目录不变；
+- `2.0 -> 2.1`：物理来源自动补齐 `SourceRef`，缓存按解析器版本增量重建，任务迁移前保留备份；
 - V1 资料空间：启动时记录为 V2 workspace，旧 Index 保留只读；
 - V1 任务：按内容哈希、相对路径和页码迁移；无法确认的项目保留并标记来源待重新确认；
 - 回退到 V1：旧 Index 未被 V2 修改，但 V2 新任务不会自动反向写入 V1；
@@ -54,4 +56,4 @@
 
 ## 发布限制
 
-`2.0.0.dev1` 是未签名开发预览。GitHub Actions 在 Windows/Python 3.12/Inno Setup 6.7.1 上构建并验证安装、卸载、重装、PDFium、OCR、页面预览和凭据读取。正式签名、Defender 干净机矩阵和 Office 深度解析仍是后续门禁。
+`2.1.0.dev0` 是未签名开发预览。GitHub Actions 在 Windows/Python 3.12/Inno Setup 6.7.1 上构建并验证安装、卸载、重装、PDFium、OCR、Office/图片/ZIP 解析、资料包导出和凭据读取。正式签名、Defender 干净机矩阵、Windows 10/网络盘矩阵和真人研究用户验收仍是后续门禁。
