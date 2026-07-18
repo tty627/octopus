@@ -18,7 +18,7 @@ import { relativeTime, taskSummaryIssueCount } from "../utils";
 
 export function HomeView({ workspace }: { workspace: Workspace }) {
   const setPage = useAppStore((state) => state.setPage);
-  const setQuery = useAppStore((state) => state.setQuery);
+  const requestSearch = useAppStore((state) => state.requestSearch);
   const setTask = useAppStore((state) => state.setTask);
   const activeTask = useAppStore((state) => state.activeTask);
   const [researchInput, setResearchInput] = useState("");
@@ -38,7 +38,7 @@ export function HomeView({ workspace }: { workspace: Workspace }) {
   const startSearch = (value = researchInput) => {
     const next = value.trim();
     if (!next) return;
-    setQuery(next);
+    requestSearch(next);
     setPage("search");
   };
 

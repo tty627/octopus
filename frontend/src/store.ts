@@ -27,6 +27,7 @@ interface AppState {
   saveState: "idle" | "saving" | "saved" | "offline" | "conflict";
   query: string;
   submittedQuery: string;
+  searchRequested: boolean;
   filters: SearchFiltersV2;
   assistedEnabled: boolean;
   setPage: (page: PageId) => void;
@@ -38,6 +39,8 @@ interface AppState {
   setSaveState: (state: AppState["saveState"]) => void;
   setQuery: (query: string) => void;
   setSubmittedQuery: (query: string) => void;
+  requestSearch: (query: string) => void;
+  consumeSearchRequest: () => void;
   setFilters: (filters: SearchFiltersV2) => void;
   setAssistedEnabled: (enabled: boolean) => void;
 }
@@ -52,6 +55,7 @@ export const useAppStore = create<AppState>((set) => ({
   saveState: "idle",
   query: "",
   submittedQuery: "",
+  searchRequested: false,
   filters: EMPTY_FILTERS,
   assistedEnabled: false,
   setPage: (page) => set({ page }),
@@ -66,6 +70,7 @@ export const useAppStore = create<AppState>((set) => ({
         inspector: null,
         inspectorOpen: false,
         submittedQuery: "",
+        searchRequested: false,
       };
     }),
   inspect: (inspector) => set({ inspector, inspectorOpen: inspector !== null }),
@@ -88,6 +93,8 @@ export const useAppStore = create<AppState>((set) => ({
     })),
   setQuery: (query) => set({ query }),
   setSubmittedQuery: (submittedQuery) => set({ submittedQuery }),
+  requestSearch: (query) => set({ query, searchRequested: true }),
+  consumeSearchRequest: () => set({ searchRequested: false }),
   setFilters: (filters) => set({ filters }),
   setAssistedEnabled: (assistedEnabled) => set({ assistedEnabled }),
 }));

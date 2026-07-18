@@ -6,7 +6,7 @@
 
 当前各版本域独立管理：
 
-- 产品开发版本：`0.4.0.dev0`。
+- 产品开发版本：`2.1.0.dev1`。
 - Leaf/FolderNode Markdown Schema：`octopus_schema: 0.2`。
 - 配置、Manifest、Fingerprint、Prompt 和搜索缓存拥有各自的版本域。
 - 规范修订号：当前目录为 `v1.0.1`。

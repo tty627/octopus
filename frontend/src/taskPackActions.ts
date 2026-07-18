@@ -2,7 +2,60 @@ import { useCallback, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "./api";
 import { clearLocalDraft, saveLocalDraft, useAppStore } from "./store";
-import type { SearchResultV2, WorkspaceEvidence, WorkspaceTask } from "./types";
+import type {
+  SearchResultV2,
+  TaskTemplateId,
+  WorkspaceEvidence,
+  WorkspaceTask,
+  WorkspaceTaskSlot,
+} from "./types";
+
+const TEMPLATE_SLOT_PREFERENCES: Record<TaskTemplateId, string[]> = {
+  literature_review: ["核心文献", "文献"],
+  course_report: ["论据与材料", "论据", "材料"],
+  free_research: ["待核验", "核心证据", "补充证据"],
+};
+
+function normalizedSlotName(slot: WorkspaceTaskSlot): string {
+  return slot.name.trim().replace(/\s+/g, "");
+}
+
+function inferredTemplate(task: WorkspaceTask): TaskTemplateId | undefined {
+  if (task.template_id) return task.template_id;
+  const names = task.slots.map(normalizedSlotName);
+  if (names.some((name) => name.includes("核心文献") || name.includes("研究缺口"))) {
+    return "literature_review";
+  }
+  if (names.some((name) => name.includes("论据与材料") || name.includes("题目与要求"))) {
+    return "course_report";
+  }
+  if (names.some((name) => name.includes("待核验")) && names.some((name) => name.includes("核心证据"))) {
+    return "free_research";
+  }
+  return undefined;
+}
+
+export function evidenceTargetSlot(task: WorkspaceTask): WorkspaceTaskSlot | undefined {
+  const slots = [...task.slots].sort((left, right) => left.position - right.position);
+  const template = inferredTemplate(task);
+  const preferences = template ? TEMPLATE_SLOT_PREFERENCES[template] : [];
+  for (const preference of preferences) {
+    const preferred = slots.find((slot) => normalizedSlotName(slot).includes(preference));
+    if (preferred) return preferred;
+  }
+
+  const specialized = (slot: WorkspaceTaskSlot) => {
+    const name = normalizedSlotName(slot);
+    if (template === "free_research" && name.includes("待核验")) return false;
+    return /待核验|研究缺口|缺口|相反|反例|结论/.test(name);
+  };
+  const evidenceNamed = slots.find((slot) =>
+    !specialized(slot) && /证据|文献|论据|材料|资料/.test(normalizedSlotName(slot))
+  );
+  return evidenceNamed
+    ?? slots.find((slot) => slot.required && !specialized(slot))
+    ?? slots.find((slot) => !specialized(slot));
+}
 
 export function appendEvidence(
   task: WorkspaceTask,
@@ -15,11 +68,17 @@ export function appendEvidence(
     item.excerpt === evidence.excerpt
   );
   if (duplicate) return task;
-  const sortedSlots = [...task.slots].sort((left, right) => left.position - right.position);
-  const target = sortedSlots.at(-1);
-  if (!target) return task;
+  const existingTarget = evidenceTargetSlot(task);
+  const target: WorkspaceTaskSlot = existingTarget ?? {
+    slot_id: crypto.randomUUID(),
+    name: "收集证据",
+    description: "手动收集、尚待归类的证据。",
+    position: Math.max(-1, ...task.slots.map((slot) => slot.position)) + 1,
+    required: false,
+  };
   return {
     ...task,
+    slots: existingTarget ? task.slots : [...task.slots, target],
     items: [
       ...task.items,
       {

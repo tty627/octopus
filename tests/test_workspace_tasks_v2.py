@@ -22,6 +22,7 @@ from octopus.workspace_tasks_v2 import (
     load_task,
     migrate_legacy_tasks,
     render_task_markdown,
+    revalidate_task_sources,
     save_task,
     task_path,
 )
@@ -157,6 +158,28 @@ def test_task_source_reconfirmation_marks_changed_and_deleted_sources(
     assert deleted.items[0].excerpt == "Original evidence"
     assert deleted.items[0].source_status == "source_unconfirmed"
     assert deleted.items[0].review_state == "pending"
+
+
+def test_explicit_source_revalidation_reads_raw_content_before_sync(tmp_path: Path) -> None:
+    source, store, original_item, saved = _create_task_with_source(tmp_path)
+    source.write_text("Changed evidence that has not been synchronized", encoding="utf-8")
+
+    indexed = store.list_documents()[0]
+    assert indexed.content_hash == original_item.content_hash
+    assert load_task(saved.workspace_id, saved.task_id).items[0].freshness_status == "current"
+
+    revalidated = revalidate_task_sources(
+        saved.workspace_id,
+        saved.task_id,
+        saved.revision,
+    )
+
+    assert revalidated.revision == saved.revision + 1
+    assert revalidated.items[0].content_hash == original_item.content_hash
+    assert revalidated.items[0].verified_content_hash == original_item.verified_content_hash
+    assert revalidated.items[0].source_status == "source_unconfirmed"
+    assert revalidated.items[0].review_state == "pending"
+    assert revalidated.items[0].freshness_status == "changed"
 
 
 def test_task_markdown_exports_pending_human_review_state(tmp_path: Path) -> None:

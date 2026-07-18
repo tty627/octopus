@@ -26,11 +26,16 @@ TOKEN = "test-token-that-is-long-enough-for-v2-api"
 def _wait_for_v2_job(
     client: TestClient,
     headers: dict[str, str],
+    workspace_id: str,
     job_id: str,
 ) -> dict[str, object]:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        response = client.get(f"/v2/jobs/{job_id}", headers=headers)
+        response = client.get(
+            f"/v2/jobs/{job_id}",
+            headers=headers,
+            params={"workspace_id": workspace_id},
+        )
         assert response.status_code == 200
         payload = response.json()
         if payload["status"] in {"succeeded", "failed"}:
@@ -137,7 +142,12 @@ def test_v2_workspace_search_preview_tasks_and_read_only_source(
         assert "index_path" not in created.text
         workspace = created.json()["workspace"]
         workspace_id = workspace["workspace_id"]
-        job = _wait_for_v2_job(client, headers, created.json()["job"]["job_id"])
+        job = _wait_for_v2_job(
+            client,
+            headers,
+            workspace_id,
+            created.json()["job"]["job_id"],
+        )
         assert job["status"] == "succeeded", job
         assert job["result"]["progress"]["phase"] == "completed"
         assert job["result"]["progress"]["processed"] == 2
@@ -184,7 +194,12 @@ def test_v2_workspace_search_preview_tasks_and_read_only_source(
             headers=headers,
         )
         assert reprocessed.status_code == 202
-        reprocess_job = _wait_for_v2_job(client, headers, reprocessed.json()["job_id"])
+        reprocess_job = _wait_for_v2_job(
+            client,
+            headers,
+            workspace_id,
+            reprocessed.json()["job_id"],
+        )
         assert reprocess_job["status"] == "succeeded", reprocess_job
         assert extracted_paths.count(pdf) == pdf_extractions + 1
         assert reprocess_job["result"]["progress"] == {

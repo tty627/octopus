@@ -19,7 +19,7 @@ from .citations import (
 )
 from .config import load_global_config, workspace_tasks_path
 from .models import GlobalWorkspace, OctopusModel, utc_now
-from .utils import atomic_write_json, atomic_write_text, load_json
+from .utils import atomic_write_json, atomic_write_text, load_json, sha256_file
 from .workspace_sources import EvidenceLocator, SourceRef
 from .workspace_v2 import WorkspaceDocument, WorkspaceStore
 
@@ -453,29 +453,23 @@ def _same_source_path(item: WorkspaceTaskItem, document: WorkspaceDocument) -> b
     return item_path.casefold() == document_path.casefold()
 
 
-def _matching_document(
+def _matching_document_candidate(
     item: WorkspaceTaskItem,
     documents: list[WorkspaceDocument],
-) -> tuple[WorkspaceDocument | None, FreshnessStatus]:
+) -> WorkspaceDocument | None:
     by_id = {document.document_id: document for document in documents}
     item_ref = _item_source_ref(item)
     document = by_id.get(item.document_id)
     if document is not None and not _same_source_scope(item_ref, _document_source_ref(document)):
         document = None
-
-    expected_hash = item.verified_content_hash or item.content_hash
     if document is not None:
-        if expected_hash and document.content_hash != expected_hash:
-            return None, "changed"
-        return document, "current" if expected_hash else "unverified"
+        return document
 
     path_matches = [document for document in documents if _same_source_path(item, document)]
     if len(path_matches) == 1:
-        path_match = path_matches[0]
-        if expected_hash and path_match.content_hash != expected_hash:
-            return None, "changed"
-        return path_match, "current" if expected_hash else "unverified"
+        return path_matches[0]
 
+    expected_hash = item.verified_content_hash or item.content_hash
     if _source_kind(item_ref) == "archive_member":
         # Archive member hashes are intentionally scoped to their container.
         scoped = [
@@ -493,8 +487,8 @@ def _matching_document(
             if expected_hash and document.content_hash == expected_hash
         ]
         if len(hash_matches) == 1 and _same_source_path(item, hash_matches[0]):
-            return hash_matches[0], "current"
-        return None, "missing"
+            return hash_matches[0]
+        return None
 
     hash_matches = [
         document
@@ -504,8 +498,21 @@ def _matching_document(
         and _source_kind(_document_source_ref(document)) != "archive_member"
     ]
     if len(hash_matches) == 1:
-        return hash_matches[0], "current"
-    return None, "missing"
+        return hash_matches[0]
+    return None
+
+
+def _matching_document(
+    item: WorkspaceTaskItem,
+    documents: list[WorkspaceDocument],
+) -> tuple[WorkspaceDocument | None, FreshnessStatus]:
+    document = _matching_document_candidate(item, documents)
+    if document is None:
+        return None, "missing"
+    expected_hash = item.verified_content_hash or item.content_hash
+    if expected_hash and document.content_hash != expected_hash:
+        return None, "changed"
+    return document, "current" if expected_hash else "unverified"
 
 
 def _apply_document_to_item(
@@ -550,11 +557,58 @@ def _reconfirm_task_sources(
     return refreshed
 
 
+def _revalidate_task_sources_from_raw(
+    task: WorkspaceTask,
+    store: WorkspaceStore,
+    documents: list[WorkspaceDocument],
+) -> WorkspaceTask:
+    refreshed = task.model_copy(deep=True)
+    for item in refreshed.items:
+        document = _matching_document_candidate(item, documents)
+        if document is None:
+            item.source_status = "source_unconfirmed"
+            item.review_state = "pending"
+            item.freshness_status = "missing"
+            continue
+        try:
+            current_hash = sha256_file(
+                store.content_path(document.document_id, verify_hash=False)
+            )
+        except FileNotFoundError:
+            item.source_status = "source_unconfirmed"
+            item.review_state = "pending"
+            item.freshness_status = "missing"
+            continue
+        except (OSError, ValueError):
+            item.source_status = "source_unconfirmed"
+            item.review_state = "pending"
+            item.freshness_status = "unverified"
+            continue
+
+        expected_hash = item.verified_content_hash or item.content_hash
+        if expected_hash and current_hash != expected_hash:
+            item.source_status = "source_unconfirmed"
+            item.review_state = "pending"
+            item.freshness_status = "changed"
+            continue
+
+        _apply_document_to_item(
+            item,
+            document,
+            "current" if expected_hash else "unverified",
+        )
+        # The SQLite index can be stale during explicit revalidation. Persist the
+        # hash read from the raw source, not the indexed document hash.
+        item.content_hash = current_hash
+    return refreshed
+
+
 def _load_task_unlocked(
     workspace_id: str,
     task_id: str,
     *,
     documents: list[WorkspaceDocument] | None = None,
+    reconfirm_sources: bool = True,
 ) -> WorkspaceTask:
     path = task_path(workspace_id, task_id)
     if not path.exists():
@@ -565,7 +619,7 @@ def _load_task_unlocked(
     if task.workspace_id != workspace_id:
         raise WorkspaceTaskNotFoundError("Task not found")
     _validate_task(task)
-    return _reconfirm_task_sources(task, documents)
+    return _reconfirm_task_sources(task, documents) if reconfirm_sources else task
 
 
 def load_task(workspace_id: str, task_id: str) -> WorkspaceTask:
@@ -581,6 +635,7 @@ def _save_task_unlocked(
     *,
     documents: list[WorkspaceDocument] | None = None,
     current: WorkspaceTask | None = None,
+    reconfirm_sources: bool = True,
 ) -> WorkspaceTask:
     if documents is None:
         documents = _current_documents(workspace_id)
@@ -594,7 +649,9 @@ def _save_task_unlocked(
         raise WorkspaceTaskConflictError(
             f"Task revision changed from {expected_revision} to {current.revision}"
         )
-    saved = _reconfirm_task_sources(replacement.model_copy(deep=True), documents)
+    saved = replacement.model_copy(deep=True)
+    if reconfirm_sources:
+        saved = _reconfirm_task_sources(saved, documents)
     _set_confirmed_metadata(saved, previous=current)
     saved.schema_version = TASK_SCHEMA_VERSION
     saved.revision = current.revision + 1
@@ -619,6 +676,42 @@ def save_task(
             task_id,
             expected_revision,
             replacement,
+        )
+
+
+def revalidate_task_sources(
+    workspace_id: str,
+    task_id: str,
+    expected_revision: int,
+) -> WorkspaceTask:
+    with _WORKSPACE_TASKS_LOCK:
+        workspace = load_global_config().workspaces.get(workspace_id)
+        if workspace is None:
+            raise WorkspaceTaskNotFoundError("Task not found")
+        store = WorkspaceStore(workspace)
+        try:
+            documents = store.list_documents()
+        except (OSError, sqlite3.Error) as error:
+            raise WorkspaceTaskError("Workspace sources could not be loaded") from error
+        current = _load_task_unlocked(
+            workspace_id,
+            task_id,
+            documents=documents,
+            reconfirm_sources=False,
+        )
+        if current.revision != expected_revision:
+            raise WorkspaceTaskConflictError(
+                f"Task revision changed from {expected_revision} to {current.revision}"
+            )
+        replacement = _revalidate_task_sources_from_raw(current, store, documents)
+        return _save_task_unlocked(
+            workspace_id,
+            task_id,
+            expected_revision,
+            replacement,
+            documents=documents,
+            current=current,
+            reconfirm_sources=False,
         )
 
 

@@ -7,6 +7,7 @@ import { ApiError, api } from "./api";
 import * as bridge from "./bridge";
 import { AISettingsView } from "./components/AISettingsView";
 import { EvidenceInspector } from "./components/EvidenceInspector";
+import { HomeView } from "./components/HomeView";
 import { RepositoriesView } from "./components/RepositoriesView";
 import { SearchWorkspace } from "./components/SearchWorkspace";
 import { TaskPacksView } from "./components/TaskPacksView";
@@ -158,6 +159,7 @@ afterEach(() => {
     saveState: "idle",
     query: "",
     submittedQuery: "",
+    searchRequested: false,
     filters: { path_prefix: "", extensions: [] },
     assistedEnabled: false,
   });
@@ -539,9 +541,79 @@ describe("task resilience", () => {
       client.clear();
     },
   );
+
+  it("confirms archive and offers an immediate undo that restores the task", async () => {
+    const source = task({ lifecycle: "saved", title: "可恢复资料包" });
+    const archived = { ...source, lifecycle: "archived" as const, revision: 2 };
+    const restored = { ...source, lifecycle: "saved" as const, revision: 3 };
+    useAppStore.setState({
+      workspaceId: "workspace-1",
+      activeTask: source,
+      taskDirty: false,
+      saveState: "saved",
+    });
+    vi.spyOn(api, "tasks").mockResolvedValue([]);
+    vi.spyOn(api, "archiveTask").mockResolvedValue(archived);
+    vi.spyOn(api, "saveTask").mockResolvedValue(restored);
+    const client = renderWithClient(<TaskPacksView />);
+
+    await userEvent.click(screen.getByRole("button", { name: "归档" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("归档“可恢复资料包”");
+    await userEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(api.archiveTask).not.toHaveBeenCalled();
+    expect(useAppStore.getState().activeTask?.task_id).toBe(source.task_id);
+
+    await userEvent.click(screen.getByRole("button", { name: "归档" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认归档" }));
+    await waitFor(() => expect(api.archiveTask).toHaveBeenCalledWith(source));
+    expect(await screen.findByRole("button", { name: "撤销归档" })).toBeVisible();
+    expect(useAppStore.getState().activeTask).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "撤销归档" }));
+    await waitFor(() => expect(api.saveTask).toHaveBeenCalledWith(expect.objectContaining({
+      task_id: source.task_id,
+      revision: archived.revision,
+      lifecycle: "saved",
+    })));
+    expect(useAppStore.getState().activeTask).toEqual(restored);
+    client.clear();
+  });
 });
 
 describe("workspace-bound evidence", () => {
+  it("runs a home-page search without requiring a second submit", async () => {
+    const currentWorkspace = workspace();
+    useAppStore.setState({ page: "home", workspaceId: currentWorkspace.workspace_id });
+    vi.spyOn(api, "tasks").mockResolvedValue([]);
+    vi.spyOn(api, "changes").mockResolvedValue([]);
+    const search = vi.spyOn(api, "search").mockResolvedValue({
+      query: "级数",
+      requested_mode: "local",
+      actual_mode: "local",
+      degradation_reason: "",
+      answer: "",
+      results: [result()],
+      candidate_count: 1,
+      duration_ms: 4,
+    });
+
+    function Harness() {
+      const page = useAppStore((state) => state.page);
+      return page === "home"
+        ? <HomeView workspace={currentWorkspace} />
+        : <SearchWorkspace addResult={vi.fn()} adding={false} actionError="" clearActionError={vi.fn()} />;
+    }
+
+    const client = renderWithClient(<Harness />);
+    await userEvent.type(screen.getByRole("textbox", { name: "输入研究问题" }), "级数");
+    await userEvent.click(screen.getByRole("button", { name: "开始查找" }));
+
+    await waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "证据.pdf" })).toBeVisible();
+    expect(useAppStore.getState().searchRequested).toBe(false);
+    client.clear();
+  });
+
   it("keeps highlights and task defaults bound to the submitted query", async () => {
     const searched = result({
       best_evidence: {
@@ -587,6 +659,51 @@ describe("workspace-bound evidence", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "将 证据.pdf 加入资料包" }));
     expect(addResult).toHaveBeenCalledWith(searched, searched.best_evidence, "级数", "workspace-1");
+    client.clear();
+  });
+
+  it("drops and revokes a highlighted preview that resolves after the evidence changes", async () => {
+    const oldResult = result({ document_id: "document-old", name: "旧证据.pdf" });
+    const newResult = result({ document_id: "document-new", name: "新证据.pdf" });
+    let resolveOldHighlight: ((url: string) => void) | undefined;
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const preview = vi.spyOn(api, "previewUrl").mockImplementation(
+      (_workspaceId, documentId, _page, _highlight, variant) => {
+        if (documentId === oldResult.document_id && variant === "highlighted") {
+          return new Promise((resolve) => { resolveOldHighlight = resolve; });
+        }
+        return Promise.resolve(`blob:${documentId}-${variant}`);
+      },
+    );
+    useAppStore.setState({
+      workspaceId: "workspace-1",
+      inspector: oldResult,
+      inspectorOpen: true,
+      submittedQuery: "旧查询",
+    });
+    const client = renderWithClient(
+      <EvidenceInspector onAdd={vi.fn()} adding={false} actionError="" />,
+    );
+
+    await waitFor(() => expect(preview).toHaveBeenCalledWith(
+      "workspace-1",
+      oldResult.document_id,
+      3,
+      "旧查询",
+      "highlighted",
+    ));
+    act(() => useAppStore.getState().inspect(newResult));
+    await waitFor(() => expect(screen.getByRole("img", { name: "新证据.pdf 第 3 页" }))
+      .toHaveAttribute("src", "blob:document-new-highlighted"));
+
+    await act(async () => {
+      resolveOldHighlight?.("blob:obsolete-highlight");
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("img", { name: "新证据.pdf 第 3 页" }))
+      .toHaveAttribute("src", "blob:document-new-highlighted");
+    expect(revoke).toHaveBeenCalledWith("blob:obsolete-highlight");
     client.clear();
   });
 

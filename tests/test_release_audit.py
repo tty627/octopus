@@ -54,6 +54,7 @@ def test_repository_release_audit_freezes_contracts_and_has_no_blockers() -> Non
         (ROOT / "docs" / "product" / "contract-freeze-v1.json").read_text(encoding="utf-8")
     )["contracts"]
     assert report.external_gates_not_executed
+    assert (ROOT / "docs" / "releases" / f"v{__version__}.md").is_file()
 
 
 def test_artifact_audit_verifies_versions_manifest_and_every_checksum(tmp_path: Path) -> None:

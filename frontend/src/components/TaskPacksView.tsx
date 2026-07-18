@@ -41,6 +41,7 @@ import type {
   ResearchTaskProposal,
   ServiceJob,
   TaskTemplateId,
+  WorkspaceTask,
   WorkspaceTaskItem,
   WorkspaceTaskSlot,
 } from "../types";
@@ -78,6 +79,9 @@ export function TaskPacksView() {
   const [revalidating, setRevalidating] = useState(false);
   const [proposal, setProposal] = useState<ResearchTaskProposal | null>(null);
   const [archiving, setArchiving] = useState(false);
+  const [archiveConfirmation, setArchiveConfirmation] = useState(false);
+  const [recentlyArchived, setRecentlyArchived] = useState<WorkspaceTask | null>(null);
+  const [restoringArchive, setRestoringArchive] = useState(false);
   const [returningToList, setReturningToList] = useState(false);
   const [resolvingConflict, setResolvingConflict] = useState(false);
   const [openedEvidence, setOpenedEvidence] = useState<Set<string>>(new Set());
@@ -95,8 +99,13 @@ export function TaskPacksView() {
     setError("");
     setSavedExport(null);
     setSavedExportName("");
+    setArchiveConfirmation(false);
+    setRecentlyArchived(null);
     setOpenedEvidence(new Set());
   }, [workspaceId]);
+  useEffect(() => {
+    setArchiveConfirmation(false);
+  }, [task?.task_id]);
   const create = useMutation({
     mutationFn: ({ sourceWorkspaceId, taskTitle, taskGoal, template }: {
       sourceWorkspaceId: string;
@@ -172,10 +181,39 @@ export function TaskPacksView() {
     }
   };
 
+  const restoreRecentlyArchived = async () => {
+    if (!recentlyArchived) return;
+    const archived = recentlyArchived;
+    setRestoringArchive(true);
+    setError("");
+    try {
+      const restored = await api.saveTask({ ...archived, lifecycle: "saved" });
+      if (useAppStore.getState().workspaceId !== archived.workspace_id) return;
+      setRecentlyArchived(null);
+      setTask(restored);
+      await queryClient.invalidateQueries({ queryKey: ["tasks", archived.workspace_id] });
+    } catch (reason) {
+      if (useAppStore.getState().workspaceId !== archived.workspace_id) return;
+      setError(reason instanceof ApiError ? reason.message : "资料包暂时无法恢复，请重试。");
+    } finally {
+      setRestoringArchive(false);
+    }
+  };
+
   if (!task) {
     return (
       <div className="tasksPage">
         <div className="pageHeading"><div><h1>资料包</h1><p>把可核验的来源、摘录和引用整理成一份研究成果底稿。</p></div></div>
+        {recentlyArchived && (
+          <div className="successBox exportSuccess" role="status">
+            <Archive size={17} />
+            <span><strong>“{recentlyArchived.title}”已归档</strong><small>已从活动资料包列表移除，可以立即恢复。</small></span>
+            <button className="secondaryButton smallButton" disabled={restoringArchive} onClick={() => void restoreRecentlyArchived()}>
+              {restoringArchive ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
+              撤销归档
+            </button>
+          </div>
+        )}
         <form className="newPackPanel" onSubmit={(event) => { event.preventDefault(); create.mutate({ sourceWorkspaceId: workspaceId, taskTitle: title, taskGoal: goal, template: templateId, requestId: ++activationSequence.current }); }}>
           <div className="templateChooser" role="radiogroup" aria-label="资料包模板">
             {taskTemplates.map((template) => (
@@ -251,14 +289,16 @@ export function TaskPacksView() {
   const archive = async () => {
     const sourceWorkspaceId = task.workspace_id;
     const sourceTaskId = task.task_id;
+    setArchiveConfirmation(false);
     setArchiving(true);
     setError("");
     try {
       const latest = await flushActiveTask(queryClient, task.workspace_id, task.task_id);
-      await api.archiveTask(latest);
-      clearLocalDraft(latest);
+      const archived = await api.archiveTask(latest);
+      clearLocalDraft(archived);
       const state = useAppStore.getState();
       if (state.workspaceId === sourceWorkspaceId && state.activeTask?.task_id === sourceTaskId) {
+        setRecentlyArchived(archived);
         setTask(null);
       }
       await queryClient.invalidateQueries({ queryKey: ["tasks", sourceWorkspaceId] });
@@ -506,8 +546,15 @@ export function TaskPacksView() {
         <span className={freshnessIssues > 0 ? "unresolvedText" : ""}>{freshnessIssues} 条来源待复核</span>
         {freshnessIssues > 0 && <button className="textButton smallButton" disabled={revalidating || saveState === "conflict"} onClick={() => void revalidateSources()}>{revalidating ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}重新核验来源</button>}
         {task.items.length > 0 && <button className="textButton smallButton" disabled={saveState === "conflict"} onClick={markAllPending}>全部标为待核验</button>}
-        <button className="textButton dangerText" disabled={archiving || exporting || saveState === "conflict"} onClick={() => void archive()}>{archiving ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}归档</button>
+        <button className="textButton dangerText" disabled={archiving || exporting || archiveConfirmation || saveState === "conflict"} onClick={() => setArchiveConfirmation(true)}>{archiving ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}归档</button>
       </div>
+      {archiveConfirmation && (
+        <div className="conflictNotice" role="alert">
+          <span><strong>归档“{task.title}”？</strong> 归档后会从活动资料包列表移除；完成后仍可立即撤销。</span>
+          <button className="secondaryButton smallButton" disabled={archiving} onClick={() => void archive()}>{archiving ? <LoaderCircle className="spin" size={15} /> : <Archive size={15} />}确认归档</button>
+          <button className="textButton smallButton" disabled={archiving} onClick={() => setArchiveConfirmation(false)}>取消</button>
+        </div>
+      )}
       <section className="packExportBar" aria-label="研究资料包导出">
         <div><FileArchive size={19} /><span><strong>研究资料包</strong><small>包含 research.md、references.bib、task.json 和 manifest.json</small></span></div>
         <label>引用样式<select value={task.citation_style ?? "gb-t-7714-2015"} onChange={(event) => updateTask((value) => ({ ...value, citation_style: event.target.value as CitationStyle }))}><option value="gb-t-7714-2015">GB/T 7714-2015</option><option value="apa">APA</option></select></label>

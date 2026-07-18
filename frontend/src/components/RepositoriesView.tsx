@@ -27,6 +27,7 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [confirmAIIndex, setConfirmAIIndex] = useState(false);
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
   const settledJob = useRef("");
   const jobStatuses = useRef(new Map<string, ServiceJob["status"]>());
   const documents = useQuery({
@@ -185,7 +186,11 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
         ))}
       </section>
 
-      <details className="addWorkspacePanel">
+      <details
+        className="addWorkspacePanel"
+        open={addingWorkspace}
+        onToggle={(event) => setAddingWorkspace(event.currentTarget.open)}
+      >
         <summary>添加另一个资料空间</summary>
         <Onboarding compact onCreated={(created, job) => {
           queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) => [
@@ -193,6 +198,7 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
             ...current.filter((item) => item.workspace_id !== created.workspace_id),
           ]);
           queryClient.setQueryData<ServiceJob[]>(["jobs", created.workspace_id], [job]);
+          setAddingWorkspace(false);
           setWorkspaceId(created.workspace_id);
           void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
         }} />

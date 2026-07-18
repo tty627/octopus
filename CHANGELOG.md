@@ -15,10 +15,15 @@
 
 - 强化专业研究工作流：统一异步研究、任务提案、来源核验、引用导出和 Windows 桌面端交互。
 - 并发资料包导出使用隔离文件，避免不同引用格式或来源选项互相覆盖。
+- 首页提交研究问题后直接执行检索；新建资料空间会立即切换到独立的空空间状态。
+- 手动加入证据时按资料包模板选择合理分组，归档资料包前要求确认并支持立即撤销。
 
 ### Fixed
 
 - 无有效证据引用的 AI 研究回答会安全降级到本地检索摘要，不再作为带引用答案接受。
+- 显式来源复核读取当前原文件哈希，不再把过期索引误判为“当前”；Job 查询和取消按资料空间隔离。
+- 页面高亮预览切换来源后会丢弃迟到响应并释放 Blob URL，避免旧页面覆盖当前证据。
+- GitHub Release 同 Tag 重跑会更新说明并覆盖旧资产，且生成可校验的 `release-audit.json`。
 
 ## [2.1.0.dev0] - 2026-07-16 (development build)
 
@@ -207,7 +212,9 @@
 - PDF、DOCX、XLSX、PPTX、图片/OCR 解析和可选 DeepSeek 摘要。
 - 轮询 Watcher、稳定性状态机、更新日志和 Markmap 输出。
 
-[Unreleased]: https://github.com/tty627/octopus/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/tty627/octopus/compare/v2.1.0.dev1...HEAD
+[2.1.0.dev1]: docs/releases/v2.1.0.dev1.md
+[2.1.0.dev0]: https://github.com/tty627/octopus/releases/tag/v2.1.0.dev0
 [1.0.0]: docs/releases/v1.0.md
 [0.3.0]: docs/releases/v0.3.md
 [0.2.0]: docs/releases/v0.2.md

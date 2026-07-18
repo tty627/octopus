@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   development-package:
     if: github.ref_type != 'tag' || contains(github.ref_name, '.dev')
@@ -44,7 +48,38 @@ jobs:
         shell: pwsh
         run: |
           $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
-          python -m octopus release-audit --expected-version $expectedVersion --artifacts release
+          $auditOutput = Join-Path $env:RUNNER_TEMP "octopus-release-audit.json"
+          python -m octopus release-audit --expected-version $expectedVersion --artifacts release |
+            Out-File -LiteralPath $auditOutput -Encoding utf8
+          $auditExitCode = $LASTEXITCODE
+          if ($auditExitCode -ne 0) {
+            Get-Content -LiteralPath $auditOutput
+            throw "Release audit failed with exit code $auditExitCode"
+          }
+          Move-Item -LiteralPath $auditOutput -Destination release\release-audit.json -Force
+          Get-Content -LiteralPath release\release-audit.json
+          $audit = Get-Content -LiteralPath release\release-audit.json -Raw | ConvertFrom-Json
+          if (-not $audit.engineering_passed) {
+            throw "Release audit did not pass"
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 release\release-audit.json).Hash.ToLowerInvariant()
+          Add-Content release\SHA256SUMS.txt "$hash *release-audit.json"
+          $expectedArtifacts = @(
+            "build-manifest.json",
+            "Octopus-$expectedVersion-win-x64-portable.zip",
+            "Octopus-$expectedVersion-win-x64-setup.exe",
+            "octopus_index-$expectedVersion-py3-none-any.whl",
+            "octopus_index-$expectedVersion.tar.gz",
+            "release-audit.json",
+            "SHA256SUMS.txt",
+            "windows-install-validation.json"
+          )
+          $actualArtifacts = @(Get-ChildItem -LiteralPath release -File | ForEach-Object Name)
+          $missing = @($expectedArtifacts | Where-Object { $_ -notin $actualArtifacts })
+          $unexpected = @($actualArtifacts | Where-Object { $_ -notin $expectedArtifacts })
+          if ($actualArtifacts.Count -ne 8 -or $missing.Count -gt 0 -or $unexpected.Count -gt 0) {
+            throw "Unexpected release asset set; missing=$($missing -join ','); unexpected=$($unexpected -join ',')"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: octopus-windows-development
@@ -56,17 +91,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
-          $notes = "Unsigned development preview. Windows may show a SmartScreen warning. Download the setup executable for normal installation or the portable zip for install-free use. Verify downloads with SHA256SUMS.txt."
-          $releaseArguments = @(
-            "release", "create", $env:GITHUB_REF_NAME,
-            "--verify-tag", "--prerelease",
-            "--title", "Octopus $expectedVersion (development preview)",
-            "--notes", $notes
-          )
-          $releaseArguments += (Get-ChildItem -LiteralPath release -File | ForEach-Object {
-            $_.FullName
-          })
-          & gh @releaseArguments
+          $notesPath = "docs\releases\v$expectedVersion.md"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+            throw "Versioned release notes are missing: $notesPath"
+          }
+          $title = "Octopus $expectedVersion (development preview)"
+          & gh release view $env:GITHUB_REF_NAME --json id *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+          if ($releaseExists) {
+            & gh release edit $env:GITHUB_REF_NAME --title $title --notes-file $notesPath --prerelease
+          }
+          else {
+            & gh release create $env:GITHUB_REF_NAME --verify-tag --prerelease --title $title --notes-file $notesPath
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create or update release $env:GITHUB_REF_NAME"
+          }
+          $assetPaths = @(Get-ChildItem -LiteralPath release -File | Sort-Object Name | ForEach-Object FullName)
+          & gh release upload $env:GITHUB_REF_NAME @assetPaths --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload release assets for $env:GITHUB_REF_NAME"
+          }
 
   signed-release:
     if: github.ref_type == 'tag' && !contains(github.ref_name, '.dev')
@@ -141,6 +186,42 @@ jobs:
           .\packaging\validate_windows_install.ps1 -Installer $installer -Checksums release\SHA256SUMS.txt -ExpectedVersion $expectedVersion -RequireSignature -Output release\windows-install-validation.json
           $hash = (Get-FileHash -Algorithm SHA256 release\windows-install-validation.json).Hash.ToLowerInvariant()
           Add-Content release\SHA256SUMS.txt "$hash *windows-install-validation.json"
+      - name: Audit signed release
+        shell: pwsh
+        run: |
+          $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          $auditOutput = Join-Path $env:RUNNER_TEMP "octopus-release-audit.json"
+          python -m octopus release-audit --expected-version $expectedVersion --artifacts release |
+            Out-File -LiteralPath $auditOutput -Encoding utf8
+          $auditExitCode = $LASTEXITCODE
+          if ($auditExitCode -ne 0) {
+            Get-Content -LiteralPath $auditOutput
+            throw "Release audit failed with exit code $auditExitCode"
+          }
+          Move-Item -LiteralPath $auditOutput -Destination release\release-audit.json -Force
+          Get-Content -LiteralPath release\release-audit.json
+          $audit = Get-Content -LiteralPath release\release-audit.json -Raw | ConvertFrom-Json
+          if (-not $audit.engineering_passed) {
+            throw "Release audit did not pass"
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 release\release-audit.json).Hash.ToLowerInvariant()
+          Add-Content release\SHA256SUMS.txt "$hash *release-audit.json"
+          $expectedArtifacts = @(
+            "build-manifest.json",
+            "Octopus-$expectedVersion-win-x64-portable.zip",
+            "Octopus-$expectedVersion-win-x64-setup.exe",
+            "octopus_index-$expectedVersion-py3-none-any.whl",
+            "octopus_index-$expectedVersion.tar.gz",
+            "release-audit.json",
+            "SHA256SUMS.txt",
+            "windows-install-validation.json"
+          )
+          $actualArtifacts = @(Get-ChildItem -LiteralPath release -File | ForEach-Object Name)
+          $missing = @($expectedArtifacts | Where-Object { $_ -notin $actualArtifacts })
+          $unexpected = @($actualArtifacts | Where-Object { $_ -notin $expectedArtifacts })
+          if ($actualArtifacts.Count -ne 8 -or $missing.Count -gt 0 -or $unexpected.Count -gt 0) {
+            throw "Unexpected release asset set; missing=$($missing -join ','); unexpected=$($unexpected -join ',')"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: octopus-windows-signed
@@ -149,14 +230,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $releaseArguments = @(
-            "release", "create", $env:GITHUB_REF_NAME,
-            "--verify-tag", "--generate-notes"
-          )
-          if ($env:GITHUB_REF_NAME -match '(a|b|rc)\d+$') {
+          $expectedVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          $notesPath = "docs\releases\v$expectedVersion.md"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+            throw "Versioned release notes are missing: $notesPath"
+          }
+          $title = "Octopus $expectedVersion"
+          $isPrerelease = $env:GITHUB_REF_NAME -match '(a|b|rc)\d+$'
+          & gh release view $env:GITHUB_REF_NAME --json id *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+          if ($releaseExists) {
+            $releaseArguments = @("release", "edit", $env:GITHUB_REF_NAME, "--title", $title, "--notes-file", $notesPath)
+          }
+          else {
+            $releaseArguments = @("release", "create", $env:GITHUB_REF_NAME, "--verify-tag", "--title", $title, "--notes-file", $notesPath)
+          }
+          if ($isPrerelease) {
             $releaseArguments += "--prerelease"
           }
-          $releaseArguments += (Get-ChildItem -LiteralPath release -File | ForEach-Object {
-            $_.FullName
-          })
           & gh @releaseArguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create or update release $env:GITHUB_REF_NAME"
+          }
+          $assetPaths = @(Get-ChildItem -LiteralPath release -File | Sort-Object Name | ForEach-Object FullName)
+          & gh release upload $env:GITHUB_REF_NAME @assetPaths --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload release assets for $env:GITHUB_REF_NAME"
+          }

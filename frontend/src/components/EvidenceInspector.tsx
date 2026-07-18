@@ -98,6 +98,14 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
   useEffect(() => {
     const previewController = new AbortController();
     const loadedUrls: string[] = [];
+    const keepUrl = (url: string) => {
+      if (!previewController.signal.aborted) {
+        loadedUrls.push(url);
+        return true;
+      }
+      if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      return false;
+    };
     setPreview("");
     setPreviewError("");
     if (!result || result.indexing_state !== "indexed") {
@@ -123,8 +131,7 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
             "",
             "base",
           );
-          loadedUrls.push(baseUrl);
-          if (previewController.signal.aborted) return;
+          if (!keepUrl(baseUrl)) return;
           setPreview(baseUrl);
           setPreviewState("ready");
           if (selectedEvidence && submittedQuery.trim()) {
@@ -136,16 +143,16 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
                 submittedQuery,
                 "highlighted",
               );
-              loadedUrls.push(highlightedUrl);
+              if (!keepUrl(highlightedUrl)) return;
               setPreview(highlightedUrl);
             } catch {
+              if (previewController.signal.aborted) return;
               setPreviewError("高亮层暂时不可用，已显示基础页面。");
             }
           }
         } else if (loadImage) {
           const imageUrl = await loadImage;
-          loadedUrls.push(imageUrl);
-          if (previewController.signal.aborted) return;
+          if (!keepUrl(imageUrl)) return;
           setPreview(imageUrl);
           setPreviewState("ready");
         }

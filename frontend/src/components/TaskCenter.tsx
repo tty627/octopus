@@ -13,7 +13,7 @@ import {
 import { ApiError, api } from "../api";
 import type { ServiceJob, WorkspaceJobProgress } from "../types";
 import { relativeTime } from "../utils";
-import { isActiveWorkspaceJob } from "../workspaceUi";
+import { isActiveJob } from "../workspaceUi";
 
 const SUCCESS_STATUSES = new Set<ServiceJob["status"]>(["succeeded"]);
 const FAILURE_STATUSES = new Set<ServiceJob["status"]>(["failed", "canceled", "interrupted"]);
@@ -28,10 +28,11 @@ export function TaskCenter({ workspaceId }: { workspaceId: string }) {
     queryKey: ["jobs", workspaceId],
     queryFn: ({ signal }) => api.jobs(workspaceId, signal),
     enabled: Boolean(workspaceId),
-    refetchInterval: (query) => query.state.data?.some(isActiveWorkspaceJob) ? 1_000 : 8_000,
+    refetchInterval: (query) => query.state.data?.some(isActiveJob) ? 1_000 : 8_000,
   });
-  const visibleJobs = (jobs.data ?? []).slice(0, 12);
-  const activeCount = visibleJobs.filter(isActiveWorkspaceJob).length;
+  const allJobs = jobs.data ?? [];
+  const visibleJobs = allJobs.filter((job, index) => index < 12 || isActiveJob(job));
+  const activeCount = allJobs.filter(isActiveJob).length;
 
   useEffect(() => {
     visibleJobs.forEach((job) => {
@@ -61,7 +62,7 @@ export function TaskCenter({ workspaceId }: { workspaceId: string }) {
   const cancel = async (job: ServiceJob) => {
     setActionError("");
     try {
-      remember(await api.cancelJob(job.job_id));
+      remember(await api.cancelJob(workspaceId, job.job_id));
     } catch (reason) {
       setActionError(reason instanceof ApiError ? reason.message : "任务暂时无法取消。");
     }
@@ -152,7 +153,7 @@ function JobRow({
       <div className="taskCenterRowTitle">
         <span>{jobStatusIcon(job)}</span>
         <div><strong>{jobLabel(job.kind)}</strong><small>{jobStatusLabel(job)} · {relativeTime(job.created_at)}</small></div>
-        {isActiveWorkspaceJob(job) && <button className="iconButton" onClick={() => void onCancel(job)} aria-label={`取消${jobLabel(job.kind)}`} title="取消"><CircleStop size={16} /></button>}
+        {isActiveJob(job) && <button className="iconButton" onClick={() => void onCancel(job)} aria-label={`取消${jobLabel(job.kind)}`} title="取消"><CircleStop size={16} /></button>}
         {canRetry && <button className="iconButton" onClick={() => void onRetry(job)} aria-label={`重试${jobLabel(job.kind)}`} title="重试"><RotateCcw size={16} /></button>}
       </div>
       {percent !== null && <div className="taskProgress"><span style={{ width: `${percent}%` }} /></div>}
@@ -227,7 +228,7 @@ function phaseLabel(phase?: string): string {
 }
 
 function jobStatusIcon(job: ServiceJob) {
-  if (isActiveWorkspaceJob(job)) return <LoaderCircle className="spin" size={16} />;
+  if (isActiveJob(job)) return <LoaderCircle className="spin" size={16} />;
   if (job.status === "succeeded") return <Check size={16} />;
   return <AlertTriangle size={16} />;
 }

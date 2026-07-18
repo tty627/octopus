@@ -30,7 +30,7 @@ export async function waitForJob(
         reject(new DOMException("Aborted", "AbortError"));
       }, { once: true });
     });
-    current = await api.job(initial.job_id);
+    current = await api.job(initial.repository_id, initial.job_id);
     options.onUpdate?.(current);
   }
   if (current.status !== "succeeded") {

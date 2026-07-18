@@ -9,6 +9,7 @@ import { RepositoriesView } from "./components/RepositoriesView";
 import { useAppStore } from "./store";
 import type { ServiceJob, Workspace, WorkspaceDocument } from "./types";
 import {
+  isActiveJob,
   isActiveWorkspaceJob,
   latestWorkspaceJob,
   workspaceJobProgressText,
@@ -152,6 +153,25 @@ describe("workspace background jobs", () => {
     expect(isActiveWorkspaceJob(running)).toBe(true);
     expect(workspaceJobProgressText(running)).toContain("3/16");
     expect(workspaceJobProgressText(running)).toContain("notes.pdf");
+  });
+
+  it("recognizes every cancellable task-center job without changing sync-only state", () => {
+    const activeKinds: ServiceJob["kind"][] = [
+      "workspace_sync",
+      "workspace_rebuild",
+      "workspace_ai_index",
+      "workspace_research",
+      "task_proposal",
+      "task_export",
+    ];
+
+    for (const kind of activeKinds) {
+      expect(isActiveJob(serviceJob("running", { kind }))).toBe(true);
+      expect(isActiveJob(serviceJob("queued", { kind }))).toBe(true);
+    }
+    expect(isActiveJob(serviceJob("succeeded", { kind: "workspace_research" }))).toBe(false);
+    expect(isActiveJob(serviceJob("running", { kind: "validate" }))).toBe(false);
+    expect(isActiveWorkspaceJob(serviceJob("running", { kind: "workspace_ai_index" }))).toBe(false);
   });
 
   it("renders page-level OCR progress while keeping legacy jobs compatible", () => {

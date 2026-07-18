@@ -99,6 +99,7 @@ def test_async_export_returns_a_real_downloadable_zip(tmp_path: Path) -> None:
             job = client.get(
                 f"/v2/jobs/{started.json()['job_id']}",
                 headers=headers,
+                params={"workspace_id": workspace.workspace_id},
             ).json()
             if job["status"] in {"succeeded", "failed"}:
                 break

@@ -58,6 +58,7 @@ from .workspace_tasks_v2 import (
     load_task,
     migrate_legacy_tasks,
     render_task_markdown,
+    revalidate_task_sources,
     save_task,
 )
 from .workspace_v2 import (
@@ -998,8 +999,11 @@ def register_workspace_routes(
     ) -> dict[str, Any]:
         _workspace_store(workspace_id)
         try:
-            current = load_task(workspace_id, task_id)
-            task = save_task(workspace_id, task_id, request.expected_revision, current)
+            task = revalidate_task_sources(
+                workspace_id,
+                task_id,
+                request.expected_revision,
+            )
         except WorkspaceTaskError as error:
             raise _handle_task_error(error) from error
         return task.model_dump(mode="json")
@@ -1133,14 +1137,19 @@ def register_workspace_routes(
         return [item.model_dump(mode="json") for item in jobs.list(workspace_id)]
 
     @app.get("/v2/jobs/{job_id}", dependencies=authenticated)
-    def workspace_job(job_id: str) -> dict[str, Any]:
+    def workspace_job(job_id: str, workspace_id: str) -> dict[str, Any]:
+        _workspace_store(workspace_id)
         job = jobs.get(job_id)
-        if job is None:
+        if job is None or job.repository_id != workspace_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
         return job.model_dump(mode="json")
 
     @app.post("/v2/jobs/{job_id}/cancel", dependencies=authenticated)
-    def workspace_job_cancel(job_id: str) -> dict[str, Any]:
+    def workspace_job_cancel(job_id: str, workspace_id: str) -> dict[str, Any]:
+        _workspace_store(workspace_id)
+        existing = jobs.get(job_id)
+        if existing is None or existing.repository_id != workspace_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
         job = jobs.cancel(job_id)
         if job is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")

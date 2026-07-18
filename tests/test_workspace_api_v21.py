@@ -16,10 +16,19 @@ from octopus.workspace_v2 import WorkspaceStore, create_workspace
 TOKEN = "v21-test-token-that-is-long-enough"
 
 
-def _wait_for_job(client: TestClient, headers: dict[str, str], job_id: str) -> dict[str, object]:
+def _wait_for_job(
+    client: TestClient,
+    headers: dict[str, str],
+    workspace_id: str,
+    job_id: str,
+) -> dict[str, object]:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        response = client.get(f"/v2/jobs/{job_id}", headers=headers)
+        response = client.get(
+            f"/v2/jobs/{job_id}",
+            headers=headers,
+            params={"workspace_id": workspace_id},
+        )
         assert response.status_code == 200
         payload = response.json()
         if payload["status"] in {"succeeded", "failed", "canceled", "interrupted"}:
@@ -79,7 +88,12 @@ def test_v21_api_sources_research_export_changes_and_jobs(tmp_path: Path) -> Non
 
         sync = client.post(f"/v2/workspaces/{workspace.workspace_id}/sync", headers=headers)
         assert sync.status_code == 202
-        sync_job = _wait_for_job(client, headers, sync.json()["job_id"])
+        sync_job = _wait_for_job(
+            client,
+            headers,
+            workspace.workspace_id,
+            sync.json()["job_id"],
+        )
         assert sync_job["status"] == "succeeded"
 
         documents = client.get(
@@ -124,7 +138,12 @@ def test_v21_api_sources_research_export_changes_and_jobs(tmp_path: Path) -> Non
             json={"limit": 1},
         )
         assert ai_job.status_code == 202
-        assert _wait_for_job(client, headers, ai_job.json()["job_id"])["status"] == "failed"
+        assert _wait_for_job(
+            client,
+            headers,
+            workspace.workspace_id,
+            ai_job.json()["job_id"],
+        )["status"] == "failed"
 
         templates = client.get("/v2/task-templates", headers=headers)
         assert templates.status_code == 200
@@ -210,6 +229,7 @@ def test_v21_api_sources_research_export_changes_and_jobs(tmp_path: Path) -> Non
         export_job = _wait_for_job(
             client,
             headers,
+            workspace.workspace_id,
             export_job_response.json()["job_id"],
         )
         assert export_job["status"] == "succeeded"
@@ -272,11 +292,37 @@ def test_v21_api_sources_research_export_changes_and_jobs(tmp_path: Path) -> Non
         )
         assert settings_conflict.status_code == 422
 
-        assert client.get("/v2/jobs/missing", headers=headers).status_code == 404
-        assert client.post("/v2/jobs/missing/cancel", headers=headers).status_code == 404
+        assert client.get("/v2/jobs/missing", headers=headers).status_code == 422
+        assert client.post("/v2/jobs/missing/cancel", headers=headers).status_code == 422
+        job_params = {"workspace_id": workspace.workspace_id}
+        assert client.get(
+            "/v2/jobs/missing",
+            headers=headers,
+            params=job_params,
+        ).status_code == 404
+        assert client.post(
+            "/v2/jobs/missing/cancel",
+            headers=headers,
+            params=job_params,
+        ).status_code == 404
+        other_raw = tmp_path / "other-workspace"
+        other_raw.mkdir()
+        other_workspace = create_workspace(other_raw, "Other")
+        other_params = {"workspace_id": other_workspace.workspace_id}
+        assert client.get(
+            f"/v2/jobs/{sync_job['job_id']}",
+            headers=headers,
+            params=other_params,
+        ).status_code == 404
+        assert client.post(
+            f"/v2/jobs/{sync_job['job_id']}/cancel",
+            headers=headers,
+            params=other_params,
+        ).status_code == 404
         cancel_finished = client.post(
             f"/v2/jobs/{sync_job['job_id']}/cancel",
             headers=headers,
+            params=job_params,
         )
         assert cancel_finished.status_code == 200
 
@@ -358,6 +404,7 @@ def test_async_research_and_proposal_jobs_keep_retry_context(
         research_job = _wait_for_job(
             client,
             headers,
+            workspace.workspace_id,
             research_response.json()["job_id"],
         )
         assert research_job["status"] == "succeeded"
@@ -380,6 +427,7 @@ def test_async_research_and_proposal_jobs_keep_retry_context(
         proposal_job = _wait_for_job(
             client,
             headers,
+            workspace.workspace_id,
             proposal_response.json()["job_id"],
         )
         assert proposal_job["status"] == "succeeded"

@@ -23,25 +23,31 @@ Protected release CI imports an Authenticode certificate into the current-user s
 
 Tags containing `.dev` use the unsigned development-prerelease job instead. That job enforces the
 tag/source version match, validates setup and portable artifacts, runs `release-audit`, and creates
-a GitHub Pre-release. Other `v*` tags remain gated by the protected signing environment.
+or updates a GitHub Pre-release from `docs/releases/v<version>.md`. Re-running the same tag updates
+the notes and replaces all assets, while ref-level concurrency prevents two runs from publishing
+the same tag simultaneously. Other `v*` tags remain gated by the protected signing environment.
 
 The script runs pytest with the coverage gate, Ruff, strict Mypy, wheel/sdist build, PyInstaller
 GUI/CLI smoke tests, SHA256 generation and signature verification. Inno signs the generated
 uninstaller and final setup; the script signs both application executables before installer
 compilation.
 
-Outputs are written to `release/`, including the setup executable and an install-free portable
-zip. Portable users extract the zip and run `Octopus.exe`; no Python or Node.js installation is
-needed. The physical CLI bootloader is `octopus-cli.exe`, with `octopus.cmd` as the user command.
-This naming is required because Windows cannot store `Octopus.exe` and `octopus.exe` as separate
-files in the same shared onedir bundle.
+Outputs are written to `release/`, including the setup executable, install-free portable zip,
+wheel, sdist, build manifest, Windows install validation, release audit and SHA-256 list. A tag
+release has exactly eight uploaded assets; `SHA256SUMS.txt` covers the other seven. Portable users
+extract the zip and run `Octopus.exe`; no Python or Node.js installation is needed. The physical
+CLI bootloader is `octopus-cli.exe`, with `octopus.cmd` as the user command. This naming is required
+because Windows cannot store `Octopus.exe` and `octopus.exe` as separate files in the same shared
+onedir bundle.
 
 Silent installer validation uses `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`; invoke the generated
 uninstaller with the same switches. Both normal and silent cases must confirm that
 `%APPDATA%\Octopus`, Raw, Index and sample data remain intact.
 
 The package workflow runs this validation automatically and emits
-`windows-install-validation.json`. To reproduce it on a Windows validation machine:
+`windows-install-validation.json`. Tag builds also emit `release-audit.json`; it records the
+version, release-document, blocker, manifest and pre-audit artifact checksum checks, then its own
+hash is appended to `SHA256SUMS.txt`. To reproduce installer validation on a Windows machine:
 
 ```powershell
 .\packaging\validate_windows_install.ps1 `

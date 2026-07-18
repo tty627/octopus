@@ -126,3 +126,34 @@ test("home, templates and archive-member evidence are exposed as research workfl
   await expect(inspector).toContainText("ZIP 内文件");
   await expect(inspector).toContainText("课程材料.zip!/论文/归档论文.pdf");
 });
+
+test("home search, workspace creation and archive recovery are single-flow actions", async ({ page }) => {
+  await page.goto("./");
+  await page.getByRole("textbox", { name: "输入研究问题" }).fill("级数");
+  await page.getByRole("button", { name: "开始查找" }).click();
+  await expect(page.getByRole("heading", { name: "查找原始资料" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "09 级数.pdf", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "资料", exact: true }).click();
+  const addWorkspace = page.locator("details.addWorkspacePanel");
+  await addWorkspace.getByText("添加另一个资料空间", { exact: true }).click();
+  await addWorkspace.getByRole("button", { name: "选择" }).click();
+  await addWorkspace.getByRole("textbox", { name: "名称" }).fill("空白研究空间");
+  await addWorkspace.getByRole("button", { name: "建立资料空间" }).click();
+
+  await expect(page.getByRole("combobox", { name: "当前资料空间" }).locator("option:checked"))
+    .toHaveText("空白研究空间");
+  await expect(page.getByText("C:\\Users\\Demo\\Documents\\Research", { exact: true })).toBeVisible();
+  await expect(page.locator(".healthStrip")).toContainText("0文档");
+  await expect(addWorkspace).not.toHaveAttribute("open", "");
+
+  await page.getByRole("button", { name: "资料包", exact: true }).click();
+  await page.getByRole("textbox", { name: "资料包名称" }).fill("可恢复资料包");
+  await page.getByRole("button", { name: "创建资料包" }).click();
+  await page.getByRole("button", { name: "归档", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("归档“可恢复资料包”");
+  await page.getByRole("button", { name: "确认归档" }).click();
+  await expect(page.getByRole("button", { name: "撤销归档" })).toBeVisible();
+  await page.getByRole("button", { name: "撤销归档" }).click();
+  await expect(page.getByRole("textbox", { name: "资料包名称" })).toHaveValue("可恢复资料包");
+});

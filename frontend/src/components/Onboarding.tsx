@@ -23,11 +23,16 @@ export function Onboarding({
   });
 
   const selectRaw = async () => {
-    const selected = await chooseDirectory();
-    if (!selected) return;
-    setRawPath(selected);
-    const leaf = selected.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1);
-    if (leaf) setName(leaf);
+    setError("");
+    try {
+      const selected = await chooseDirectory();
+      if (!selected) return;
+      setRawPath(selected);
+      const leaf = selected.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1);
+      if (leaf) setName(leaf);
+    } catch {
+      setError("文件夹选择器没有打开，请重试。");
+    }
   };
 
   return (

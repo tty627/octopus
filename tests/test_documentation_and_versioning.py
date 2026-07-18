@@ -131,10 +131,26 @@ def test_release_workflow_checks_versions_and_marks_prereleases() -> None:
     assert "SIGNING_TIMESTAMP_URL must be an absolute HTTPS URL" in workflow
     assert "contains(github.ref_name, '.dev')" in workflow
     assert "name: Publish development prerelease" in workflow
-    assert '"--verify-tag", "--prerelease"' in workflow
+    assert "concurrency:" in workflow
+    assert "group: ${{ github.workflow }}-${{ github.ref }}" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "release-audit.json" in workflow
+    assert "$actualArtifacts.Count -ne 8" in workflow
+    assert "gh release edit" in workflow
+    assert "gh release upload" in workflow
+    assert "--clobber" in workflow
+    assert "--notes-file" in workflow
+    assert "--verify-tag --prerelease" in workflow
     assert "Audit development release" in workflow
+    assert "Audit signed release" in workflow
     assert '$buildParameters = @{ Python = "python" }' in workflow
     assert "@buildParameters" in workflow
+    notes = (ROOT / "docs" / "releases" / f"v{__version__}.md").read_text(encoding="utf-8")
+    assert "## 功能摘要" in notes
+    assert "## 发布验证" in notes
+    assert "## 发布资产" in notes
+    assert "## 已知限制" in notes
+    assert "Windows 安装说明" in notes
     assert "VersionInfoVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductVersion={#AppNumericVersion}" in installer
     assert "VersionInfoProductTextVersion={#AppVersion}" in installer

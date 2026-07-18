@@ -2618,7 +2618,7 @@ class WorkspaceStore:
             )
         return changes
 
-    def content_path(self, document_id: str) -> Path:
+    def content_path(self, document_id: str, *, verify_hash: bool = True) -> Path:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT * FROM documents WHERE document_id = ?", (document_id,)
@@ -2631,7 +2631,7 @@ class WorkspaceStore:
                 self.raw,
                 source_ref,
                 cache_root=self._member_cache_root(),
-                expected_hash=str(row["content_hash"]),
+                expected_hash=str(row["content_hash"]) if verify_hash else "",
                 policy=self._archive_policy(),
             )
         source = self._source_path(str(row["relative_path"]))

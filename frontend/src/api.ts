@@ -334,8 +334,13 @@ export const api = {
     request<WorkspaceChange[]>(`/v2/workspaces/${workspaceId}/changes`),
   jobs: (workspaceId: string, signal?: AbortSignal) =>
     request<ServiceJob[]>(`/v2/jobs?workspace_id=${encodeURIComponent(workspaceId)}`, { signal }),
-  job: (jobId: string) => request<ServiceJob>(`/v2/jobs/${jobId}`),
+  job: (workspaceId: string, jobId: string) => request<ServiceJob>(
+    `/v2/jobs/${jobId}?workspace_id=${encodeURIComponent(workspaceId)}`,
+  ),
   researchResult: (job: ServiceJob) => job.result as unknown as WorkspaceResearchResult,
-  cancelJob: (jobId: string) =>
-    request<ServiceJob>(`/v2/jobs/${jobId}/cancel`, { method: "POST" }),
+  cancelJob: (workspaceId: string, jobId: string) =>
+    request<ServiceJob>(
+      `/v2/jobs/${jobId}/cancel?workspace_id=${encodeURIComponent(workspaceId)}`,
+      { method: "POST" },
+    ),
 };

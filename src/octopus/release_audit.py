@@ -189,6 +189,8 @@ def _repository_checks(root: Path, expected_version: str) -> list[ReleaseCheck]:
                 root / "docs" / "releases" / "v1.0-engineering-report.md",
             ]
         )
+    if parsed.major >= 2:
+        required_documents.append(root / "docs" / "releases" / f"v{expected_version}.md")
     missing = [str(path.relative_to(root)) for path in required_documents if not path.is_file()]
     _check(
         checks,

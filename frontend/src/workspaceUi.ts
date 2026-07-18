@@ -49,6 +49,20 @@ export function isActiveWorkspaceJob(job: ServiceJob): boolean {
   return job.kind === "workspace_sync" && (job.status === "queued" || job.status === "running");
 }
 
+const TASK_CENTER_JOB_KINDS = new Set<ServiceJob["kind"]>([
+  "workspace_sync",
+  "workspace_rebuild",
+  "workspace_ai_index",
+  "workspace_research",
+  "task_proposal",
+  "task_export",
+]);
+
+export function isActiveJob(job: ServiceJob): boolean {
+  return TASK_CENTER_JOB_KINDS.has(job.kind)
+    && (job.status === "queued" || job.status === "running");
+}
+
 export function latestWorkspaceJob(jobs: ServiceJob[]): ServiceJob | undefined {
   let latest: ServiceJob | undefined;
   let latestTime = Number.NEGATIVE_INFINITY;

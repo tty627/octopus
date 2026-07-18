@@ -66,6 +66,8 @@ export function SearchWorkspace({
   const query = useAppStore((state) => state.query);
   const setQuery = useAppStore((state) => state.setQuery);
   const setSubmittedQuery = useAppStore((state) => state.setSubmittedQuery);
+  const searchRequested = useAppStore((state) => state.searchRequested);
+  const consumeSearchRequest = useAppStore((state) => state.consumeSearchRequest);
   const filters = useAppStore((state) => state.filters);
   const setFilters = useAppStore((state) => state.setFilters);
   const inspector = useAppStore((state) => state.inspector);
@@ -177,12 +179,19 @@ export function SearchWorkspace({
       if (currentSequence === sequence.current) setActiveResearchJob(null);
     }
   };
+  const runSearchRef = useRef(runSearch);
+  runSearchRef.current = runSearch;
+  useEffect(() => {
+    if (!searchRequested) return;
+    consumeSearchRequest();
+    void runSearchRef.current();
+  }, [consumeSearchRequest, searchRequested]);
 
   const cancelResearch = async () => {
     if (!activeResearchJob) return;
     controller.current?.abort();
     try {
-      await api.cancelJob(activeResearchJob.job_id);
+      await api.cancelJob(activeResearchJob.repository_id, activeResearchJob.job_id);
       setStage("idle");
       setResearchPhase("");
       setError("研究任务已取消，本地资料和已有结果均未改变。");

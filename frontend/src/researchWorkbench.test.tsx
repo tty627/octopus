@@ -10,7 +10,7 @@ import { TaskPacksView } from "./components/TaskPacksView";
 import { TaskCenter } from "./components/TaskCenter";
 import { locatorLabel, sourceKindLabel } from "./components/researchLabels";
 import { EMPTY_FILTERS, useAppStore } from "./store";
-import type { SearchResultV2, WorkspaceTask } from "./types";
+import type { SearchResultV2, ServiceJob, WorkspaceTask } from "./types";
 
 function renderWithClient(ui: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -195,6 +195,48 @@ describe("research pack workflows", () => {
     await userEvent.click(await screen.findByRole("button", { name: "任务中心" }));
     await userEvent.click(screen.getByRole("button", { name: "重试研究问题" }));
     await waitFor(() => expect(retry).toHaveBeenCalledWith("workspace-1", "课程证据", filters));
+    client.clear();
+  });
+
+  it("counts, polls, and cancels every active workspace task kind", async () => {
+    const kinds: ServiceJob["kind"][] = [
+      "workspace_sync",
+      "workspace_rebuild",
+      "workspace_ai_index",
+      "workspace_research",
+      "task_proposal",
+      "task_export",
+    ];
+    const activeJobs: ServiceJob[] = kinds.map((kind) => ({
+      job_id: `job-${kind}`,
+      repository_id: "workspace-1",
+      kind,
+      status: "running",
+      created_at: "2026-07-16T00:00:00Z",
+      result: {},
+      error_code: "",
+      error_message: "",
+    }));
+    vi.spyOn(api, "jobs").mockResolvedValue(activeJobs);
+    const cancel = vi.spyOn(api, "cancelJob").mockImplementation((_, jobId) => {
+      const job = activeJobs.find((item) => item.job_id === jobId);
+      if (!job) throw new Error(`Unknown job: ${jobId}`);
+      return Promise.resolve({ ...job, status: "canceled" });
+    });
+    const client = renderWithClient(<TaskCenter workspaceId="workspace-1" />);
+
+    expect(await screen.findByText("6 个任务进行中")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "任务中心" }));
+    const labels = ["资料同步", "索引重建", "AI 索引", "研究问题", "资料提案", "研究包导出"];
+    for (const label of labels) {
+      expect(screen.getByRole("button", { name: `取消${label}` })).toBeVisible();
+    }
+
+    await userEvent.click(screen.getByRole("button", { name: "取消AI 索引" }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith(
+      "workspace-1",
+      "job-workspace_ai_index",
+    ));
     client.clear();
   });
 
