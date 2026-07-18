@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.background import BackgroundTask
 
 from . import __version__
 from .citations import DEFAULT_CITATION_STYLE, normalize_citation_style
@@ -40,7 +41,7 @@ from .research_ai import (
     run_ai_index,
     run_workspace_research,
 )
-from .research_export import export_research_bundle
+from .research_export import export_research_bundle, research_bundle_filename
 from .service_runtime import JobManager
 from .vision import analyze_selected_page, vision_preflight
 from .workspace_tasks_v2 import (
@@ -1016,6 +1017,7 @@ def register_workspace_routes(
         _workspace_store(workspace_id)
         try:
             task = load_task(workspace_id, task_id)
+            download_name = research_bundle_filename(task)
             output = export_research_bundle(
                 task,
                 citation_style=normalize_citation_style(request.citation_style),
@@ -1025,7 +1027,12 @@ def register_workspace_routes(
             raise _handle_task_error(error) from error
         except (OSError, ValueError, FileNotFoundError) as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
-        return FileResponse(output, media_type="application/zip", filename=output.name)
+        return FileResponse(
+            output,
+            media_type="application/zip",
+            filename=download_name,
+            background=BackgroundTask(output.unlink, missing_ok=True),
+        )
 
     @app.post(
         "/v2/workspaces/{workspace_id}/tasks/{task_id}/exports",
@@ -1061,7 +1068,14 @@ def register_workspace_routes(
                 include_sources=request.include_sources,
                 progress_callback=relay,
             )
-            artifact = register_export_artifact(workspace_id, output)
+            try:
+                artifact = register_export_artifact(
+                    workspace_id,
+                    output,
+                    file_name=research_bundle_filename(task),
+                )
+            finally:
+                output.unlink(missing_ok=True)
             result = artifact.model_dump(mode="json")
             result["progress"] = {
                 "phase": "completed",

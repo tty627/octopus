@@ -92,7 +92,12 @@ def cleanup_export_artifacts(workspace_id: str) -> None:
         record_path.with_suffix(".zip").unlink(missing_ok=True)
 
 
-def register_export_artifact(workspace_id: str, source: Path) -> ExportArtifact:
+def register_export_artifact(
+    workspace_id: str,
+    source: Path,
+    *,
+    file_name: str | None = None,
+) -> ExportArtifact:
     root = _artifact_root(workspace_id)
     cleanup_export_artifacts(workspace_id)
     source = source.expanduser().resolve()
@@ -106,7 +111,7 @@ def register_export_artifact(workspace_id: str, source: Path) -> ExportArtifact:
     artifact = ExportArtifact(
         artifact_id=artifact_id,
         workspace_id=workspace_id,
-        file_name=source.name,
+        file_name=file_name or source.name,
         size_bytes=destination.stat().st_size,
         sha256=sha256_file(destination),
         created_at=utc_now(),

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -194,7 +196,8 @@ def test_export_research_bundle_writes_manifest_citations_and_selected_sources(
     monkeypatch.setattr(WorkspaceStore, "materialize_document", materialize)
     output = export_research_bundle(task, citation_style="apa", include_sources=True)
 
-    assert output.name == "Research- -2026-Preview--task-123.zip"
+    assert output.name.startswith("Research- -2026-Preview--task-123-")
+    assert output.suffix == ".zip"
     with zipfile.ZipFile(output) as archive:
         names = set(archive.namelist())
         assert {
@@ -224,6 +227,54 @@ def test_export_research_bundle_writes_manifest_citations_and_selected_sources(
     without_sources = export_research_bundle(task, include_sources=False)
     with zipfile.ZipFile(without_sources) as archive:
         assert not any(name.startswith("sources/") for name in archive.namelist())
+
+
+def test_concurrent_research_exports_use_isolated_output_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "workspace-concurrent-export"
+    raw = tmp_path / "raw"
+    storage = tmp_path / "storage"
+    raw.mkdir()
+    storage.mkdir()
+    config = load_global_config()
+    config.workspaces[workspace_id] = GlobalWorkspace(
+        workspace_id=workspace_id,
+        name="Concurrent export",
+        raw_path=str(raw),
+        storage_path=str(storage),
+    )
+    save_global_config(config)
+    task = _task(workspace_id)
+    barrier = threading.Barrier(2)
+    monkeypatch.setattr(research_export, "_reconfirm_task_sources", lambda value: value)
+
+    def create(style: str) -> Path:
+        def synchronize(progress: dict[str, object]) -> None:
+            if progress.get("phase") == "packaging":
+                barrier.wait(timeout=5)
+
+        return export_research_bundle(
+            task,
+            citation_style=style,  # type: ignore[arg-type]
+            progress_callback=synchronize,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        apa = executor.submit(create, "apa")
+        chinese = executor.submit(create, "gb-t-7714-2015")
+        outputs = [apa.result(timeout=10), chinese.result(timeout=10)]
+
+    assert outputs[0] != outputs[1]
+    manifests = []
+    for output in outputs:
+        with zipfile.ZipFile(output) as archive:
+            manifests.append(json.loads(archive.read("manifest.json")))
+    assert {manifest["citation_style"] for manifest in manifests} == {
+        "apa",
+        "gb-t-7714-2015",
+    }
 
 
 def test_export_research_bundle_rejects_unknown_workspace() -> None:

@@ -14,7 +14,7 @@
 开发预览版未签名，Windows 可能显示 SmartScreen。先使用 `SHA256SUMS.txt` 校验安装包，不要使用来源不明的副本。
 
 ```powershell
-Get-FileHash .\Octopus-2.1.0.dev0-win-x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Octopus-*-win-x64-setup.exe -Algorithm SHA256
 ```
 
 Hash 一致后，按 [Windows 安装说明](WINDOWS_INSTALLATION.md) 操作。正式签名版本不应要求绕过无效签名或损坏文件警告。

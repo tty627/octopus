@@ -2,7 +2,7 @@
 
 ## 支持范围
 
-`2.1.0.dev0` 支持 Windows 11 x64。安装包包含 Python 运行时、PDF/Office/图片/ZIP 解析依赖、本地 OCR 和桌面资源，不需要用户安装 Node.js 或配置 API Key。
+当前源码候选 `2.1.0.dev1` 支持 Windows 11 x64。安装包包含 Python 运行时、PDF/Office/图片/ZIP 解析依赖、本地 OCR 和桌面资源，不需要用户安装 Node.js 或配置 API Key。
 
 桌面界面依赖 Microsoft WebView2 Runtime。多数 Windows 11 设备已经包含该组件；缺失时应用会显示启动错误。
 
@@ -10,8 +10,8 @@
 
 从 [GitHub Releases](https://github.com/tty627/octopus/releases) 获取：
 
-- `Octopus-2.1.0.dev0-win-x64-setup.exe`；
-- 或 `Octopus-2.1.0.dev0-win-x64-portable.zip`；
+- `Octopus-<版本>-win-x64-setup.exe`；
+- 或 `Octopus-<版本>-win-x64-portable.zip`；
 - `SHA256SUMS.txt`。
 
 不要从聊天附件、网盘转存或不明镜像运行安装包。
@@ -21,7 +21,7 @@
 开发预览版未签名，安装前应校验 SHA-256：
 
 ```powershell
-Get-FileHash .\Octopus-2.1.0.dev0-win-x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Octopus-*-win-x64-setup.exe -Algorithm SHA256
 ```
 
 输出必须与 `SHA256SUMS.txt` 中对应文件一致。Hash 不一致时删除该文件并从 GitHub Release 重新下载。

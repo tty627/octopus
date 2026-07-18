@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import tempfile
+import uuid
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -26,6 +27,10 @@ from .workspace_v2 import WorkspaceStore
 def _safe_name(value: str, fallback: str = "资料包") -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value).strip(" .")
     return cleaned[:120] or fallback
+
+
+def research_bundle_filename(task: WorkspaceTask) -> str:
+    return f"{_safe_name(task.title)}-{task.task_id[:8]}.zip"
 
 
 def _fallback_citation(item: WorkspaceTaskItem) -> CitationRecord:
@@ -123,7 +128,7 @@ def export_research_bundle(
     include_sources: bool = False,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> Path:
-    """Create a local, deterministic research bundle without mutating raw sources."""
+    """Create an isolated local research bundle without mutating raw sources."""
     style = citation_style
     workspace = load_global_config().workspaces.get(task.workspace_id)
     if workspace is None:
@@ -136,7 +141,9 @@ def export_research_bundle(
     store = WorkspaceStore(workspace)
     export_root = Path(workspace.storage_path).expanduser().resolve() / "exports"
     export_root.mkdir(parents=True, exist_ok=True)
-    output = export_root / f"{_safe_name(task.title)}-{task.task_id[:8]}.zip"
+    bundle_name = research_bundle_filename(task)
+    output = export_root / f"{Path(bundle_name).stem}-{uuid.uuid4().hex}.zip"
+    temporary_output = output.with_suffix(".tmp.zip")
     temporary_dir = Path(tempfile.mkdtemp(prefix="octopus-export-", dir=str(export_root)))
     try:
         markdown = _render_markdown(task, style)
@@ -230,7 +237,6 @@ def export_research_bundle(
             temporary_dir / "task.json",
             json.dumps(task.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
         )
-        temporary_output = output.with_suffix(".tmp.zip")
         if progress_callback is not None:
             progress_callback(
                 {
@@ -253,5 +259,9 @@ def export_research_bundle(
                 }
             )
         return output
+    except BaseException:
+        temporary_output.unlink(missing_ok=True)
+        output.unlink(missing_ok=True)
+        raise
     finally:
         shutil.rmtree(temporary_dir, ignore_errors=True)

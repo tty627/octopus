@@ -270,14 +270,15 @@ def run_workspace_research(
                 else []
             )
             candidate_answer = str(output.get("answer", "")).strip()
-            invalid_refs = {
-                match for match in re.findall(r"\[([A-Za-z]+\d+)\]", candidate_answer)
-                if match not in allowed
-            }
+            answer_refs = set(re.findall(r"\[([A-Za-z]+\d+)\]", candidate_answer))
+            invalid_refs = answer_refs - allowed
             if invalid_refs:
                 raise ValueError("AI answer cited evidence outside the supplied candidates")
-            if candidate_answer:
-                answer = candidate_answer
+            if not candidate_answer:
+                raise ValueError("AI answer is empty")
+            if not citation_ids and not answer_refs:
+                raise ValueError("AI answer did not cite supplied evidence")
+            answer = candidate_answer
             raw_warnings = output.get("warnings", [])
             if isinstance(raw_warnings, list):
                 warnings.extend(str(value) for value in raw_warnings if str(value))

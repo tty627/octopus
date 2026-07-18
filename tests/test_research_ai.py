@@ -198,6 +198,32 @@ def test_workspace_research_keeps_local_results_when_ai_citation_is_invalid(
     assert result["warnings"] == ["辅助模型不可用，本次保留本地检索结果。"]
 
 
+def test_workspace_research_keeps_local_results_when_ai_answer_has_no_citation(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = _workspace(tmp_path)
+    import octopus.research_ai as module
+
+    class UncitedAnswerProvider:
+        def _json_call(self, *args, **kwargs):
+            return {"answer": "这是一条没有证据引用的结论。", "citation_ids": []}
+
+    monkeypatch.setattr(module, "get_workspace", lambda _: workspace)
+    monkeypatch.setattr(
+        module,
+        "create_provider",
+        lambda *args, **kwargs: UncitedAnswerProvider(),
+    )
+
+    result = run_workspace_research(workspace.workspace_id, "alpha evidence")
+
+    assert result["actual_mode"] == "degraded"
+    assert result["degradation_reason"] == "ValueError"
+    assert result["answer"] == "在当前资料空间中找到 1 份相关资料。"
+    assert result["warnings"] == ["辅助模型不可用，本次保留本地检索结果。"]
+
+
 def test_research_proposal_only_uses_server_candidates(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path)
     import octopus.research_ai as module
