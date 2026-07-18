@@ -15,6 +15,7 @@ from octopus.models import AIConfig, GlobalWorkspace
 from octopus.workspace_v2 import (
     ExtractedPage,
     ExtractedSource,
+    PDFExtractionBudget,
     WorkspaceEvidence,
     WorkspaceSearchResult,
     WorkspaceStore,
@@ -26,6 +27,54 @@ from octopus.workspace_v2 import (
     readability_score,
     search_terms,
 )
+
+
+def test_pdf_ocr_budget_resumes_without_repeating_completed_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PIL import Image
+
+    pdf = tmp_path / "scanned.pdf"
+    pages = [Image.new("RGB", (30, 40), "white") for _ in range(30)]
+    pages[0].save(pdf, "PDF", save_all=True, append_images=pages[1:])
+    ocr_calls: list[int] = []
+
+    def recognize(_image: object) -> str:
+        ocr_calls.append(len(ocr_calls) + 1)
+        return "可检索的 OCR 页面文本"
+
+    monkeypatch.setattr(workspace_v2, "_ocr_text", recognize)
+    first = _extract_pdf(
+        pdf,
+        budget=PDFExtractionBudget(max_ocr_pages=2, max_ocr_seconds=120),
+    )
+    assert first.ocr_completed_pages == 2
+    assert first.ocr_pending_pages == 28
+    assert len(ocr_calls) == 2
+
+    previous = tuple(
+        (page.page_number or 0, page.text, page.quality_score)
+        for page in first.pages
+        if page.extraction_method == "ocr"
+    )
+    second = _extract_pdf(
+        pdf,
+        budget=PDFExtractionBudget(
+            max_ocr_pages=2,
+            max_ocr_seconds=120,
+            previous_ocr_pages=previous,
+        ),
+    )
+    assert second.ocr_completed_pages == 4
+    assert second.ocr_pending_pages == 26
+    assert len(ocr_calls) == 4
+    assert [page.page_number for page in second.pages if page.extraction_method == "ocr"][:4] == [
+        1,
+        2,
+        3,
+        4,
+    ]
 
 
 def _store(raw: Path) -> WorkspaceStore:

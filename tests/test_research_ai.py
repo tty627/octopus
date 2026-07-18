@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from octopus.models import GeneratedSummary, GlobalWorkspace
+from octopus.models import AIUsage, GeneratedSummary, GlobalWorkspace
 from octopus.research_ai import (
     confirm_research_proposal,
     create_research_proposal,
@@ -78,6 +78,49 @@ def test_ai_index_is_incremental_and_resumable(tmp_path, monkeypatch):
     second = run_ai_index(workspace.workspace_id, limit=20)
     assert second["errors"] == []
     assert second["status"]["estimated_calls"] == 0
+
+
+def test_failed_ai_cards_retry_only_after_explicit_request(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    import octopus.research_ai as module
+
+    monkeypatch.setattr(module, "get_workspace", lambda _: workspace)
+
+    class FailingProvider(FakeResearchProvider):
+        def __init__(self) -> None:
+            self.usage = AIUsage()
+
+        def generate_leaf(self, document):
+            self.usage.calls += 1
+            raise RuntimeError("quota unavailable")
+
+    failing = FailingProvider()
+    monkeypatch.setattr(module, "create_provider", lambda *args, **kwargs: failing)
+    first = run_ai_index(workspace.workspace_id, scope="documents")
+    assert first["failed"] == 1
+    assert failing.usage.calls == 1
+
+    class CountingProvider(FakeResearchProvider):
+        def __init__(self) -> None:
+            self.usage = AIUsage()
+            self.document_calls = 0
+
+        def generate_leaf(self, document):
+            self.document_calls += 1
+            self.usage.calls += 1
+            return super().generate_leaf(document)
+
+    skipped = CountingProvider()
+    monkeypatch.setattr(module, "create_provider", lambda *args, **kwargs: skipped)
+    second = run_ai_index(workspace.workspace_id, scope="documents")
+    assert second["completed"] == 0
+    assert skipped.document_calls == 0
+
+    retried = CountingProvider()
+    monkeypatch.setattr(module, "create_provider", lambda *args, **kwargs: retried)
+    third = run_ai_index(workspace.workspace_id, scope="documents", retry_failed=True)
+    assert third["completed"] == 1
+    assert retried.document_calls == 1
 
 
 def test_research_proposal_only_uses_server_candidates(tmp_path, monkeypatch):

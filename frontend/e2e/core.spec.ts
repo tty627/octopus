@@ -5,7 +5,7 @@ test("search, page preview, task collection and export form a V2 loop", async ({
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("./");
   await page.locator(".sideNav").getByRole("button", { name: "搜索", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "搜索原始资料" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "查找原始资料" })).toBeVisible();
   await page.getByRole("textbox", { name: "搜索原始资料" }).fill("微分方程");
   await page.locator(".primarySearch").getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page.getByRole("button", { name: "微分方程coursenotes.pdf", exact: true })).toBeVisible();
@@ -61,11 +61,16 @@ test("documents health, reprocess and explicit vision authorization are usable",
 
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await expect(page.getByRole("heading", { name: "页面图像授权" })).toBeVisible();
-  const vision = page.getByRole("checkbox", { name: "允许发送疑难页面图像" });
+  await page.getByLabel("服务预设").selectOption("glm");
+  await page.getByLabel("模型").fill("glm-4.6v");
+  await page.getByLabel("API Key").fill("e2e-test-key");
+  await page.getByRole("button", { name: "测试连接", exact: true }).click();
+  await expect(page.getByText("连接成功", { exact: true })).toBeVisible();
+  const vision = page.getByRole("checkbox", { name: "允许发送明确选择的单页图像" });
   await expect(vision).not.toBeChecked();
   await vision.check();
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
-  await expect(page.getByText("设置已保存。 ")).toBeVisible();
+  await expect(page.getByText("设置已保存。", { exact: true })).toBeVisible();
 });
 
 test("responsive layouts remain usable without horizontal overflow", async ({ page }) => {

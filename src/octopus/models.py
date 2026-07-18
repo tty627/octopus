@@ -102,6 +102,7 @@ class UpdatePolicy(OctopusModel):
 
 class AIConfig(OctopusModel):
     provider: str = "deepseek"
+    provider_preset: str = "deepseek"
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-flash"
     complex_model: str = "deepseek-v4-pro"
@@ -110,6 +111,8 @@ class AIConfig(OctopusModel):
     max_transport_retries: int = 3
     json_repair_attempts: int = 1
     enabled: bool = True
+    tested_capabilities: dict[str, bool] = Field(default_factory=dict)
+    capabilities_tested_at: str = ""
     input_cost_per_million: float | None = Field(default=None, ge=0)
     output_cost_per_million: float | None = Field(default=None, ge=0)
     prompt_version: str = PROMPT_VERSION
@@ -168,6 +171,9 @@ class WorkspaceSyncPolicy(OctopusModel):
     reconciliation_interval_minutes: int = Field(default=10, ge=1, le=1_440)
     stable_check_seconds: int = Field(default=2, ge=0, le=120)
     stable_retry_count: int = Field(default=3, ge=0, le=10)
+    max_pdf_pages: int = Field(default=2_000, ge=1, le=20_000)
+    max_ocr_pages_per_run: int = Field(default=25, ge=0, le=2_000)
+    max_ocr_seconds_per_file: int = Field(default=120, ge=1, le=7_200)
     excluded_globs: list[str] = Field(default_factory=list)
 
 
@@ -661,6 +667,8 @@ class ServiceJob(OctopusModel):
         "workspace_sync",
         "workspace_rebuild",
         "workspace_ai_index",
+        "workspace_research",
+        "task_proposal",
         "task_export",
     ]
     status: JobStatus = JobStatus.queued

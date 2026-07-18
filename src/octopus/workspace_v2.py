@@ -7,6 +7,7 @@ import math
 import os
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 import uuid
@@ -23,6 +24,7 @@ from typing import Any, Literal, cast
 
 from pydantic import Field
 
+from .cancellation import OperationCancelledError
 from .config import (
     global_config_lock,
     load_global_config,
@@ -56,6 +58,9 @@ MAX_DOCX_TABLE_CELLS = 100_000
 MAX_XLSX_CELLS = 100_000
 MAX_PPTX_SLIDES = 5_000
 MAX_IMAGE_PIXELS = 80_000_000
+DEFAULT_MAX_PDF_PAGES = 2_000
+DEFAULT_MAX_OCR_PAGES_PER_RUN = 25
+DEFAULT_MAX_OCR_SECONDS_PER_FILE = 120
 TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -90,11 +95,24 @@ IGNORED_DIRECTORY_NAMES = {
     "__pycache__",
 }
 
+@dataclass(frozen=True)
+class PDFExtractionBudget:
+    max_pages: int = DEFAULT_MAX_PDF_PAGES
+    max_ocr_pages: int = DEFAULT_MAX_OCR_PAGES_PER_RUN
+    max_ocr_seconds: int = DEFAULT_MAX_OCR_SECONDS_PER_FILE
+    previous_ocr_pages: tuple[tuple[int, str, float], ...] = ()
+
+
 ExtractionProgressCallback = Callable[[dict[str, Any]], None]
 _EXTRACTION_PROGRESS_CALLBACK: ContextVar[ExtractionProgressCallback | None] = ContextVar(
     "octopus_extraction_progress_callback",
     default=None,
 )
+_PDF_EXTRACTION_BUDGET: ContextVar[PDFExtractionBudget | None] = ContextVar(
+    "octopus_pdf_extraction_budget",
+    default=None,
+)
+_PREVIEW_RENDER_SEMAPHORE = threading.BoundedSemaphore(2)
 
 
 class WorkspaceEvidence(OctopusModel):
@@ -117,7 +135,7 @@ class WorkspaceSearchResult(OctopusModel):
     page_count: int = Field(ge=0)
     readability: Literal["readable", "partial", "low"]
     readability_score: float = Field(ge=0.0, le=1.0)
-    indexing_state: Literal["indexed", "metadata_only", "failed"]
+    indexing_state: Literal["indexed", "metadata_only", "failed", "pending"]
     source_uri: str
     source_ref: SourceRef | None = None
     locator: EvidenceLocator | None = None
@@ -157,6 +175,8 @@ class WorkspaceHealth(OctopusModel):
     low_quality_count: int = 0
     metadata_only_count: int = 0
     failed_count: int = 0
+    queued_count: int = 0
+    processing_count: int = 0
     last_sync_at: str = ""
 
 
@@ -184,7 +204,12 @@ class WorkspaceDocument(OctopusModel):
     page_count: int = Field(ge=0)
     readability: Literal["readable", "partial", "low"]
     readability_score: float = Field(ge=0.0, le=1.0)
-    indexing_state: Literal["indexed", "metadata_only", "failed"]
+    indexing_state: Literal["indexed", "metadata_only", "failed", "pending"]
+    processing_state: Literal["queued", "processing", "ready", "failed"] = "ready"
+    processing_error: str = ""
+    processing_updated_at: str = ""
+    ocr_completed_pages: int = 0
+    ocr_pending_pages: int = 0
     error: str = ""
     source_uri: str
     source_ref: SourceRef | None = None
@@ -222,6 +247,8 @@ class ExtractedSource:
     error_code: str = ""
     parser_key: str = ""
     parser_version: str = PARSER_API_VERSION
+    ocr_completed_pages: int = 0
+    ocr_pending_pages: int = 0
 
 
 def _script_name(character: str) -> str:
@@ -329,11 +356,22 @@ def _readability_value(value: object) -> Literal["readable", "partial", "low"]:
     return cast(Literal["readable", "partial", "low"], text)
 
 
-def _indexing_state_value(value: object) -> Literal["indexed", "metadata_only", "failed"]:
+def _indexing_state_value(
+    value: object,
+) -> Literal["indexed", "metadata_only", "failed", "pending"]:
     text = str(value)
-    if text not in {"indexed", "metadata_only", "failed"}:
+    if text not in {"indexed", "metadata_only", "failed", "pending"}:
         return "failed"
-    return cast(Literal["indexed", "metadata_only", "failed"], text)
+    return cast(Literal["indexed", "metadata_only", "failed", "pending"], text)
+
+
+def _processing_state_value(
+    value: object,
+) -> Literal["queued", "processing", "ready", "failed"]:
+    text = str(value)
+    if text not in {"queued", "processing", "ready", "failed"}:
+        return "ready"
+    return cast(Literal["queued", "processing", "ready", "failed"], text)
 
 
 def normalize_search_text(value: str) -> str:
@@ -407,6 +445,7 @@ def _ocr_text(image: Any) -> str:
 def _extract_pdf(
     path: Path,
     progress_callback: ExtractionProgressCallback | None = None,
+    budget: PDFExtractionBudget | None = None,
 ) -> ExtractedSource:
     import pypdfium2 as pdfium  # type: ignore[import-untyped]
     from pypdf import PdfReader
@@ -415,14 +454,27 @@ def _extract_pdf(
     reader: PdfReader | None = None
     pages: list[ExtractedPage] = []
     page_count = len(document)
-    ocr_pages_completed = 0
+    active_budget = budget or PDFExtractionBudget()
+    page_limit = min(page_count, active_budget.max_pages)
+    previous_ocr_pages = {
+        page_number: (text, score)
+        for page_number, text, score in active_budget.previous_ocr_pages
+        if 1 <= page_number <= page_limit
+    }
+    ocr_pages_completed = len(previous_ocr_pages)
+    ocr_pages_processed_this_run = 0
+    ocr_pages_pending = 0
+    extraction_started = time.monotonic()
+    quality_flags: list[str] = []
+    if page_count > page_limit:
+        quality_flags.append("pdf_page_limit_reached")
 
     def report_progress(**changes: Any) -> None:
         if progress_callback is not None:
             progress_callback(dict(changes))
 
     try:
-        for page_index in range(page_count):
+        for page_index in range(page_limit):
             page_number = page_index + 1
             base_progress = {
                 "current_page": page_number,
@@ -457,18 +509,34 @@ def _extract_pdf(
                     score = pypdf_score
                     method = "pypdf"
             if score < READABLE_THRESHOLD:
-                report_progress(extraction_stage="ocr", **base_progress)
-                bitmap = page.render(scale=2.0)
-                try:
-                    ocr_text = _ocr_text(bitmap.to_pil()).strip()
-                finally:
-                    bitmap.close()
-                ocr_pages_completed += 1
-                ocr_score = readability_score(ocr_text)
-                if ocr_text and (ocr_score >= score + 0.05 or score < PARTIAL_THRESHOLD):
-                    selected_text = ocr_text
-                    score = ocr_score
-                    method = "ocr"
+                previous_ocr = previous_ocr_pages.get(page_number)
+                if previous_ocr is not None:
+                    cached_text, cached_score = previous_ocr
+                    if cached_text and (cached_score >= score + 0.05 or score < PARTIAL_THRESHOLD):
+                        selected_text = cached_text
+                        score = cached_score
+                        method = "ocr"
+                within_ocr_budget = previous_ocr is None and (
+                    ocr_pages_processed_this_run < active_budget.max_ocr_pages
+                    and time.monotonic() - extraction_started < active_budget.max_ocr_seconds
+                )
+                if within_ocr_budget:
+                    report_progress(extraction_stage="ocr", **base_progress)
+                    bitmap = page.render(scale=2.0)
+                    try:
+                        ocr_text = _ocr_text(bitmap.to_pil()).strip()
+                    finally:
+                        bitmap.close()
+                    ocr_pages_completed += 1
+                    ocr_pages_processed_this_run += 1
+                    ocr_score = readability_score(ocr_text)
+                    if ocr_text and (ocr_score >= score + 0.05 or score < PARTIAL_THRESHOLD):
+                        selected_text = ocr_text
+                        score = ocr_score
+                        method = "ocr"
+                elif previous_ocr is None:
+                    ocr_pages_pending += 1
+                    report_progress(extraction_stage="ocr_deferred", **base_progress)
             pages.append(
                 ExtractedPage(
                     page_number=page_number,
@@ -494,9 +562,22 @@ def _extract_pdf(
     return ExtractedSource(
         title=title,
         pages=pages,
-        page_count=len(pages),
+        page_count=page_count,
+        quality_flags=[
+            *quality_flags,
+            *(["ocr_budget_exhausted"] if ocr_pages_pending else []),
+        ],
+        error_code=(
+            "pdf_page_limit_reached"
+            if page_count > page_limit
+            else "ocr_budget_exhausted"
+            if ocr_pages_pending
+            else ""
+        ),
         parser_key="v2.pdf",
-        parser_version="2",
+        parser_version="3",
+        ocr_completed_pages=ocr_pages_completed,
+        ocr_pending_pages=ocr_pages_pending,
     )
 
 
@@ -858,9 +939,13 @@ class WorkspaceParserRegistry:
         self.parsers = [
             WorkspaceParser(
                 "v2.pdf",
-                "2",
+                "3",
                 frozenset({".pdf"}),
-                lambda path: _extract_pdf(path, _EXTRACTION_PROGRESS_CALLBACK.get()),
+                lambda path: _extract_pdf(
+                    path,
+                    _EXTRACTION_PROGRESS_CALLBACK.get(),
+                    _PDF_EXTRACTION_BUDGET.get() or PDFExtractionBudget(),
+                ),
             ),
             WorkspaceParser("v2.docx", "1", frozenset({".docx"}), _extract_docx),
             WorkspaceParser("v2.xlsx", "1", frozenset({".xlsx", ".xlsm"}), _extract_xlsx),
@@ -1276,6 +1361,11 @@ class WorkspaceStore:
                 source_ref_json TEXT NOT NULL DEFAULT '',
                 parent_document_id TEXT NOT NULL DEFAULT '',
                 freshness_status TEXT NOT NULL DEFAULT 'current',
+                processing_state TEXT NOT NULL DEFAULT 'ready',
+                processing_error TEXT NOT NULL DEFAULT '',
+                processing_updated_at TEXT NOT NULL DEFAULT '',
+                ocr_completed_pages INTEGER NOT NULL DEFAULT 0,
+                ocr_pending_pages INTEGER NOT NULL DEFAULT 0,
                 indexed_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS documents_content_hash ON documents(content_hash);
@@ -1342,6 +1432,11 @@ class WorkspaceStore:
             "source_ref_json": "TEXT NOT NULL DEFAULT ''",
             "parent_document_id": "TEXT NOT NULL DEFAULT ''",
             "freshness_status": "TEXT NOT NULL DEFAULT 'current'",
+            "processing_state": "TEXT NOT NULL DEFAULT 'ready'",
+            "processing_error": "TEXT NOT NULL DEFAULT ''",
+            "processing_updated_at": "TEXT NOT NULL DEFAULT ''",
+            "ocr_completed_pages": "INTEGER NOT NULL DEFAULT 0",
+            "ocr_pending_pages": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in additive_document_columns.items():
             if name not in document_columns:
@@ -1696,6 +1791,106 @@ class WorkspaceStore:
                 failed += 1
         return indexed, failed
 
+    def _register_discovered_file(
+        self,
+        connection: sqlite3.Connection,
+        path: Path,
+        relative_path: str,
+    ) -> None:
+        now = utc_now()
+        current = connection.execute(
+            "SELECT document_id FROM documents WHERE relative_path = ?",
+            (relative_path,),
+        ).fetchone()
+        if current is not None:
+            connection.execute(
+                "UPDATE documents SET processing_state = 'queued', processing_error = '', "
+                "processing_updated_at = ? WHERE relative_path = ?",
+                (now, relative_path),
+            )
+            return
+        try:
+            stat = path.stat()
+            size_bytes = stat.st_size
+            mtime_ns = stat.st_mtime_ns
+            modified_at = _modified_at(stat)
+        except OSError:
+            size_bytes = 0
+            mtime_ns = 0
+            modified_at = now
+        document_id = str(uuid.uuid4())
+        source_ref = physical_source_ref(
+            relative_path,
+            archive=path.suffix.casefold() == ".zip",
+        ).model_copy(update={"stable_id": document_id})
+        connection.execute(
+            """
+            INSERT INTO documents(
+                document_id, relative_path, name, extension, content_hash, size_bytes, mtime_ns,
+                modified_at, title, overview, page_count, readability, readability_score,
+                indexing_state, error, quality_flags_json, error_code, parser_key, parser_version,
+                source_kind, container_path, member_path, source_ref_json, parent_document_id,
+                freshness_status, processing_state, processing_error, processing_updated_at,
+                ocr_completed_pages, ocr_pending_pages, indexed_at
+            ) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, '', 0, 'low', 0, 'pending', '', '[]', '', '',
+                      '', ?, '', '', ?, '', 'current', 'queued', '', ?, 0, 0, '')
+            """,
+            (
+                document_id,
+                relative_path,
+                path.name,
+                path.suffix.casefold(),
+                size_bytes,
+                mtime_ns,
+                modified_at,
+                path.stem,
+                source_ref.source_kind,
+                _source_ref_json(source_ref),
+                now,
+            ),
+        )
+
+    def _preserve_or_replace_failed_document(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        previous: sqlite3.Row | None,
+        document_id: str,
+        relative_path: str,
+        path: Path,
+        content_hash: str,
+        stat: os.stat_result,
+        error: Exception,
+    ) -> None:
+        message = f"{type(error).__name__}: {error}"[:500]
+        if previous is not None and str(previous["indexing_state"]) in {
+            "indexed",
+            "metadata_only",
+        }:
+            connection.execute(
+                "UPDATE documents SET processing_state = 'failed', processing_error = ?, "
+                "processing_updated_at = ?, freshness_status = 'stale' WHERE document_id = ?",
+                (message, utc_now(), document_id),
+            )
+            return
+        self._replace_failed_document(
+            connection,
+            document_id=document_id,
+            relative_path=relative_path,
+            path=path,
+            name=path.name,
+            extension=path.suffix.casefold(),
+            content_hash=content_hash,
+            size_bytes=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            modified_at=_modified_at(stat),
+            error=error,
+            source_ref=physical_source_ref(
+                relative_path,
+                archive=path.suffix.casefold() == ".zip",
+            ),
+        )
+
     def sync(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -1731,7 +1926,6 @@ class WorkspaceStore:
 
         report_progress()
         files = _iter_source_files(self.raw)
-        report_progress(phase="processing", discovered=len(files))
         discovered_paths = {path.relative_to(self.raw).as_posix() for path in files}
         seen: set[str] = set()
         indexed = 0
@@ -1740,12 +1934,24 @@ class WorkspaceStore:
         processed = 0
         forced = force_document_ids or set()
         with closing(self._connect()) as connection:
+            existing_before = {
+                str(row["relative_path"]): row
+                for row in connection.execute("SELECT * FROM documents").fetchall()
+            }
+            for path in files:
+                self._register_discovered_file(
+                    connection,
+                    path,
+                    path.relative_to(self.raw).as_posix(),
+                )
+            connection.commit()
+            report_progress(phase="processing", discovered=len(files))
             existing = {
                 str(row["relative_path"]): row
                 for row in connection.execute("SELECT * FROM documents").fetchall()
             }
             movable_by_identity: dict[tuple[str, str], list[sqlite3.Row]] = {}
-            for relative_path, row in existing.items():
+            for relative_path, row in existing_before.items():
                 source_kind = str(_row_value(row, "source_kind", "physical") or "physical")
                 if (
                     relative_path not in discovered_paths
@@ -1759,24 +1965,70 @@ class WorkspaceStore:
                 relative = path.relative_to(self.raw).as_posix()
                 report_progress(clear_page_progress=True, current_file=relative)
                 seen.add(relative)
-                stat, content_hash = _stable_snapshot(
-                    path,
-                    attempts=max(1, self.workspace.sync_policy.stable_retry_count),
-                )
                 current = existing.get(relative)
+                if current is None:
+                    continue
+                work_document_id = str(current["document_id"])
+                connection.execute(
+                    "UPDATE documents SET processing_state = 'processing', processing_error = '', "
+                    "processing_updated_at = ? WHERE document_id = ?",
+                    (utc_now(), work_document_id),
+                )
+                connection.commit()
+                try:
+                    stat, content_hash = _stable_snapshot(
+                        path,
+                        attempts=max(1, self.workspace.sync_policy.stable_retry_count),
+                    )
+                except OperationCancelledError:
+                    connection.execute(
+                        "UPDATE documents SET processing_state = 'queued', "
+                        "processing_updated_at = ? "
+                        "WHERE document_id = ?",
+                        (utc_now(), work_document_id),
+                    )
+                    connection.commit()
+                    raise
+                except Exception as error:
+                    message = f"{type(error).__name__}: {error}"[:500]
+                    connection.execute(
+                        "UPDATE documents SET processing_state = 'failed', processing_error = ?, "
+                        "processing_updated_at = ? WHERE document_id = ?",
+                        (message, utc_now(), work_document_id),
+                    )
+                    self._record_change(
+                        connection,
+                        kind="parser_warning",
+                        document_id=work_document_id,
+                        name=path.name,
+                        relative_path=relative,
+                        message=message,
+                    )
+                    connection.commit()
+                    failed += 1
+                    processed += 1
+                    report_progress(
+                        processed=processed,
+                        indexed=indexed,
+                        unchanged=unchanged,
+                        failed=failed,
+                    )
+                    continue
                 expected_parser_key, expected_parser_version = parser_signature(path)
+                previous = existing_before.get(relative)
                 if (
-                    current is not None
-                    and str(current["document_id"]) not in forced
-                    and str(current["indexing_state"]) != "failed"
-                    and int(current["size_bytes"]) == stat.st_size
-                    and int(current["mtime_ns"]) == stat.st_mtime_ns
-                    and str(current["content_hash"]) == content_hash
-                    and str(current["parser_key"]) == expected_parser_key
-                    and str(current["parser_version"]) == expected_parser_version
+                    previous is not None
+                    and str(previous["document_id"]) not in forced
+                    and str(previous["indexing_state"]) != "failed"
+                    and str(_row_value(previous, "processing_state", "ready")) != "failed"
+                    and int(previous["size_bytes"]) == stat.st_size
+                    and int(previous["mtime_ns"]) == stat.st_mtime_ns
+                    and str(previous["content_hash"]) == content_hash
+                    and str(previous["parser_key"]) == expected_parser_key
+                    and str(previous["parser_version"]) == expected_parser_version
                 ):
                     if path.suffix.casefold() == ".zip" and self.workspace.archive_policy.enabled:
-                        for member_path, member_row in existing.items():
+                        for member_path, member_row in existing_before.items():
                             if (
                                 str(_row_value(member_row, "source_kind", ""))
                                 == "archive_member"
@@ -1784,6 +2036,12 @@ class WorkspaceStore:
                                 == relative
                             ):
                                 seen.add(member_path)
+                    connection.execute(
+                        "UPDATE documents SET processing_state = 'ready', processing_error = '', "
+                        "processing_updated_at = ? WHERE document_id = ?",
+                        (utc_now(), work_document_id),
+                    )
+                    connection.commit()
                     unchanged += 1
                     processed += 1
                     report_progress(
@@ -1793,12 +2051,21 @@ class WorkspaceStore:
                         failed=failed,
                     )
                     continue
-                document_id = str(current["document_id"]) if current else ""
                 moved_row: sqlite3.Row | None = None
-                if not document_id:
+                is_placeholder = (
+                    str(current["indexing_state"]) == "pending"
+                    and not str(current["content_hash"])
+                )
+                if is_placeholder:
                     source_kind = "archive" if path.suffix.casefold() == ".zip" else "physical"
                     moved_candidates = movable_by_identity.get((source_kind, content_hash), [])
                     moved_row = moved_candidates.pop(0) if moved_candidates else None
+                document_id = (
+                    work_document_id
+                    if moved_row is None
+                    else str(moved_row["document_id"])
+                )
+                if not document_id:
                     document_id = (
                         str(moved_row["document_id"])
                         if moved_row is not None
@@ -1807,6 +2074,34 @@ class WorkspaceStore:
                 try:
                     progress_token = _EXTRACTION_PROGRESS_CALLBACK.set(
                         lambda update: report_progress(**update)
+                    )
+                    previous_ocr_pages: tuple[tuple[int, str, float], ...] = ()
+                    if (
+                        previous is not None
+                        and path.suffix.casefold() == ".pdf"
+                        and str(previous["content_hash"]) == content_hash
+                    ):
+                        previous_ocr_pages = tuple(
+                            (
+                                int(row["page_number"]),
+                                str(row["text"]),
+                                float(row["quality_score"]),
+                            )
+                            for row in connection.execute(
+                                "SELECT page_number, text, quality_score FROM pages "
+                                "WHERE document_id = ? AND extraction_method = 'ocr' "
+                                "ORDER BY page_number",
+                                (str(previous["document_id"]),),
+                            ).fetchall()
+                            if row["page_number"] is not None
+                        )
+                    budget_token = _PDF_EXTRACTION_BUDGET.set(
+                        PDFExtractionBudget(
+                            max_pages=self.workspace.sync_policy.max_pdf_pages,
+                            max_ocr_pages=self.workspace.sync_policy.max_ocr_pages_per_run,
+                            max_ocr_seconds=self.workspace.sync_policy.max_ocr_seconds_per_file,
+                            previous_ocr_pages=previous_ocr_pages,
+                        )
                     )
                     try:
                         extracted = extract_source(path)
@@ -1825,8 +2120,11 @@ class WorkspaceStore:
                                 parser_version="1",
                             )
                     finally:
+                        _PDF_EXTRACTION_BUDGET.reset(budget_token)
                         _EXTRACTION_PROGRESS_CALLBACK.reset(progress_token)
                     connection.execute("SAVEPOINT replace_document")
+                    if moved_row is not None and work_document_id != document_id:
+                        self._delete_document(connection, work_document_id)
                     self._replace_document(
                         connection,
                         document_id=document_id,
@@ -1852,7 +2150,7 @@ class WorkspaceStore:
                             relative_path=relative,
                             previous_path=str(moved_row["relative_path"]),
                         )
-                    elif current is None:
+                    elif previous is None:
                         self._record_change(
                             connection,
                             kind="added",
@@ -1883,38 +2181,43 @@ class WorkspaceStore:
                         )
                         indexed += member_indexed
                         failed += member_failed
+                    connection.commit()
+                except OperationCancelledError:
+                    connection.rollback()
+                    connection.execute(
+                        "UPDATE documents SET processing_state = 'queued', processing_error = '', "
+                        "processing_updated_at = ? WHERE document_id = ?",
+                        (utc_now(), work_document_id),
+                    )
+                    connection.commit()
+                    raise
                 except Exception as error:
+                    connection.rollback()
                     try:
                         connection.execute("ROLLBACK TO SAVEPOINT replace_document")
                         connection.execute("RELEASE SAVEPOINT replace_document")
                     except sqlite3.OperationalError:
                         pass
-                    self._replace_failed_document(
+                    self._preserve_or_replace_failed_document(
                         connection,
-                        document_id=document_id,
+                        previous=previous,
+                        document_id=work_document_id,
                         relative_path=relative,
                         path=path,
-                        name=path.name,
-                        extension=path.suffix.casefold(),
                         content_hash=content_hash,
-                        size_bytes=stat.st_size,
-                        mtime_ns=stat.st_mtime_ns,
-                        modified_at=_modified_at(stat),
+                        stat=stat,
                         error=error,
-                        source_ref=physical_source_ref(
-                            relative,
-                            archive=path.suffix.casefold() == ".zip",
-                        ),
                     )
                     self._record_change(
                         connection,
                         kind="parser_warning",
-                        document_id=document_id,
+                        document_id=work_document_id,
                         name=path.name,
                         relative_path=relative,
                         message=f"{type(error).__name__}: {error}",
                     )
                     failed += 1
+                    connection.commit()
                 processed += 1
                 report_progress(
                     processed=processed,
@@ -2016,9 +2319,10 @@ class WorkspaceStore:
                 modified_at, title, overview, page_count, readability, readability_score,
                 indexing_state, error, quality_flags_json, error_code, parser_key, parser_version,
                 source_kind, container_path, member_path, source_ref_json, parent_document_id,
-                freshness_status, indexed_at
+                freshness_status, processing_state, processing_error, processing_updated_at,
+                ocr_completed_pages, ocr_pending_pages, indexed_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 document_id,
@@ -2046,6 +2350,11 @@ class WorkspaceStore:
                 _source_ref_json(stable_source_ref),
                 parent_document_id,
                 "current",
+                "ready",
+                "",
+                utc_now(),
+                extracted.ocr_completed_pages,
+                extracted.ocr_pending_pages,
                 utc_now(),
             ),
         )
@@ -2135,9 +2444,10 @@ class WorkspaceStore:
                 modified_at, title, overview, page_count, readability, readability_score,
                 indexing_state, error, quality_flags_json, error_code, parser_key, parser_version,
                 source_kind, container_path, member_path, source_ref_json, parent_document_id,
-                freshness_status, indexed_at
+                freshness_status, processing_state, processing_error, processing_updated_at,
+                ocr_completed_pages, ocr_pending_pages, indexed_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 'low', 0, 'failed', ?, '[]',
-                      'parser_failed', ?, ?, ?, ?, ?, ?, ?, 'current', ?)
+                      'parser_failed', ?, ?, ?, ?, ?, ?, ?, 'current', 'failed', ?, ?, 0, 0, ?)
             """,
             (
                 document_id,
@@ -2157,6 +2467,8 @@ class WorkspaceStore:
                 source_ref.member_path,
                 _source_ref_json(stable_source_ref),
                 parent_document_id,
+                f"{type(error).__name__}: {error}"[:500],
+                utc_now(),
                 utc_now(),
             ),
         )
@@ -2183,6 +2495,16 @@ class WorkspaceStore:
                     "SELECT COUNT(*) FROM documents WHERE indexing_state = 'failed'"
                 ).fetchone()[0]
             )
+            queued = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM documents WHERE processing_state = 'queued'"
+                ).fetchone()[0]
+            )
+            processing = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM documents WHERE processing_state = 'processing'"
+                ).fetchone()[0]
+            )
             last_sync = connection.execute(
                 "SELECT value FROM workspace_metadata WHERE key = 'last_sync_at'"
             ).fetchone()
@@ -2193,6 +2515,8 @@ class WorkspaceStore:
                 low_quality_count=counts.get("low", 0),
                 metadata_only_count=metadata_only,
                 failed_count=failed,
+                queued_count=queued,
+                processing_count=processing,
                 last_sync_at=str(last_sync[0]) if last_sync else "",
             )
 
@@ -2321,6 +2645,27 @@ class WorkspaceStore:
             raise ValueError("Document exceeds the content preview limit")
         return path.read_bytes()
 
+    def page_text(self, document_id: str, page_number: int, *, limit: int = 12_000) -> str:
+        if page_number < 1:
+            raise ValueError("Page number must be positive")
+        with closing(self._connect()) as connection:
+            document = connection.execute(
+                "SELECT extension, page_count FROM documents WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            if document is None:
+                raise FileNotFoundError("Document not found")
+            if page_number > max(1, int(document["page_count"])):
+                raise FileNotFoundError("Page not found")
+            rows = connection.execute(
+                "SELECT text FROM pages WHERE document_id = ? "
+                "AND (page_number = ? OR (page_number IS NULL AND ? = 1)) "
+                "ORDER BY page_id",
+                (document_id, page_number, page_number),
+            ).fetchall()
+        text = "\n\n".join(str(row["text"]).strip() for row in rows if str(row["text"]).strip())
+        return text[: max(1, limit)]
+
     def materialize_document(self, document_id: str) -> Path:
         return self.content_path(document_id)
 
@@ -2358,6 +2703,13 @@ class WorkspaceStore:
             readability=_readability_value(row["readability"]),
             readability_score=float(row["readability_score"]),
             indexing_state=_indexing_state_value(row["indexing_state"]),
+            processing_state=_processing_state_value(
+                _row_value(row, "processing_state", "ready")
+            ),
+            processing_error=str(_row_value(row, "processing_error")),
+            processing_updated_at=str(_row_value(row, "processing_updated_at")),
+            ocr_completed_pages=int(str(_row_value(row, "ocr_completed_pages", 0) or 0)),
+            ocr_pending_pages=int(str(_row_value(row, "ocr_pending_pages", 0) or 0)),
             error=str(row["error"]),
             source_uri=source_uri,
             source_ref=source_ref,
@@ -2746,6 +3098,38 @@ class WorkspaceStore:
         document_id: str,
         page_number: int,
         highlight: str = "",
+        variant: Literal["base", "highlighted"] = "highlighted",
+    ) -> Path:
+        if variant not in {"base", "highlighted"}:
+            raise ValueError("Unknown preview variant")
+        if len(" ".join(highlight.split()).strip()) > 200:
+            raise ValueError("Preview highlight is too long")
+        effective_highlight = highlight if variant == "highlighted" else ""
+        scale = 1.8 if effective_highlight else 1.25
+        try:
+            with _PREVIEW_RENDER_SEMAPHORE:
+                return self._preview_path_impl(
+                    document_id,
+                    page_number,
+                    effective_highlight,
+                    scale,
+                )
+        except OperationCancelledError:
+            raise
+        except (FileNotFoundError, ValueError):
+            raise
+        except Exception:
+            if not effective_highlight:
+                raise
+            with _PREVIEW_RENDER_SEMAPHORE:
+                return self._preview_path_impl(document_id, page_number, "", 1.25)
+
+    def _preview_path_impl(
+        self,
+        document_id: str,
+        page_number: int,
+        highlight: str,
+        scale: float,
     ) -> Path:
         if page_number < 1:
             raise ValueError("Page number must be positive")
@@ -2774,13 +3158,18 @@ class WorkspaceStore:
             raise ValueError("Page preview is available only for PDF and image documents")
         if page_number > int(row["page_count"]):
             raise FileNotFoundError("Page not found")
-        suffix = ""
+        suffix = "-base" if not highlight else ""
         if highlight:
             digest = hashlib.sha256(normalize_search_text(highlight).encode("utf-8")).hexdigest()[
                 :16
             ]
             suffix = f"-{digest}"
-        destination = self.previews / str(row["content_hash"]) / f"{page_number}{suffix}.png"
+        scale_key = str(round(scale * 100))
+        destination = (
+            self.previews
+            / str(row["content_hash"])
+            / f"{page_number}-{scale_key}{suffix}.png"
+        )
         if destination.exists():
             return destination
         import pypdfium2 as pdfium
@@ -2789,7 +3178,7 @@ class WorkspaceStore:
         document = pdfium.PdfDocument(str(source))
         try:
             page = document[page_number - 1]
-            bitmap = page.render(scale=1.8)
+            bitmap = page.render(scale=scale)
             try:
                 render_image: Any = bitmap.to_pil()
                 if highlight:

@@ -15,9 +15,8 @@ export function appendEvidence(
     item.excerpt === evidence.excerpt
   );
   if (duplicate) return task;
-  const pending = result.readability !== "readable";
   const sortedSlots = [...task.slots].sort((left, right) => left.position - right.position);
-  const target = pending ? sortedSlots.at(-1) : sortedSlots[0];
+  const target = sortedSlots.at(-1);
   if (!target) return task;
   return {
     ...task,
@@ -34,14 +33,14 @@ export function appendEvidence(
         excerpt: evidence.excerpt,
         rationale: evidence.reason,
         slot_id: target.slot_id,
-        review_state: pending ? "pending" : "confirmed",
+        review_state: "pending",
         source_status: "resolved",
         source_ref: result.source_ref ?? null,
         quality_flags: result.quality_flags ?? [],
         error_code: result.error_code ?? "",
         freshness_status: result.freshness_status ?? "unverified",
-        verified_content_hash: pending ? "" : result.content_hash,
-        verified_at: pending ? "" : new Date().toISOString(),
+        verified_content_hash: "",
+        verified_at: "",
         position: task.items.filter((item) => item.slot_id === target.slot_id).length,
         added_at: new Date().toISOString(),
       },

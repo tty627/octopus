@@ -11,13 +11,15 @@ import {
   FileSearch,
   LoaderCircle,
   Plus,
+  ScanSearch,
+  Send,
   X,
 } from "lucide-react";
 import { api } from "../api";
 import { recentActivity } from "../activity";
 import { openLocalUri } from "../bridge";
 import { useAppStore } from "../store";
-import type { SearchResultV2, WorkspaceEvidence } from "../types";
+import type { SearchResultV2, VisionAnalysis, VisionPreflight, WorkspaceEvidence } from "../types";
 import { documentQualityLabel, formatBytes, searchEvidenceText } from "../utils";
 import { locatorLabel, sourceKindLabel } from "./researchLabels";
 
@@ -40,8 +42,15 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
   const [selectedEvidenceIndex, setSelectedEvidenceIndex] = useState<number | null>(null);
   const [preview, setPreview] = useState("");
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [previewError, setPreviewError] = useState("");
+  const [previewNonce, setPreviewNonce] = useState(0);
   const [openError, setOpenError] = useState("");
   const [opening, setOpening] = useState(false);
+  const [visionPreflight, setVisionPreflight] = useState<VisionPreflight | null>(null);
+  const [visionAnalysis, setVisionAnalysis] = useState<VisionAnalysis | null>(null);
+  const [visionPrompt, setVisionPrompt] = useState("请描述当前页面的关键信息，并指出需要人工核验的细节。");
+  const [visionLoading, setVisionLoading] = useState(false);
+  const [visionError, setVisionError] = useState("");
   const evidence = useMemo(
     () => result ? [result.best_evidence, ...result.additional_evidence] : [],
     [result],
@@ -63,6 +72,7 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
       : result?.readability;
   const selectedLocator = selectedEvidence?.locator ?? result?.locator;
   const isImage = Boolean(result && imageExtensions.has(result.extension));
+  const visionPage = isImage ? 1 : result?.extension === ".pdf" ? page : null;
   const members = useQuery({
     queryKey: ["document-members", workspaceId, result?.document_id],
     queryFn: () => api.documentMembers(workspaceId, result?.document_id ?? ""),
@@ -74,42 +84,84 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
     setPage(result?.best_evidence.locator?.page_number ?? result?.best_evidence.page_number ?? null);
     setSelectedEvidenceIndex(result ? 0 : null);
     setOpenError("");
+    setVisionPreflight(null);
+    setVisionAnalysis(null);
+    setVisionError("");
   }, [result]);
 
   useEffect(() => {
-    let active = true;
-    let nextUrl = "";
+    setVisionPreflight(null);
+    setVisionAnalysis(null);
+    setVisionError("");
+  }, [page]);
+
+  useEffect(() => {
+    const previewController = new AbortController();
+    const loadedUrls: string[] = [];
     setPreview("");
+    setPreviewError("");
     if (!result || result.indexing_state !== "indexed") {
       setPreviewState("idle");
       return () => undefined;
     }
-    const load = result.extension === ".pdf" && page !== null
-      ? api.previewUrl(workspaceId, result.document_id, page, selectedEvidence ? submittedQuery : "")
-      : imageExtensions.has(result.extension)
-        ? api.contentUrl(workspaceId, result.document_id)
-        : null;
-    if (!load) {
+    const isPdfPage = result.extension === ".pdf" && page !== null;
+    const loadImage = imageExtensions.has(result.extension)
+      ? api.contentUrl(workspaceId, result.document_id)
+      : null;
+    if (!isPdfPage && !loadImage) {
       setPreviewState("idle");
       return () => undefined;
     }
     setPreviewState("loading");
-    void load.then((url) => {
-      nextUrl = url;
-      if (!active) {
-        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
-        return;
+    void (async () => {
+      try {
+        if (isPdfPage) {
+          const baseUrl = await api.previewUrl(
+            workspaceId,
+            result.document_id,
+            page,
+            "",
+            "base",
+          );
+          loadedUrls.push(baseUrl);
+          if (previewController.signal.aborted) return;
+          setPreview(baseUrl);
+          setPreviewState("ready");
+          if (selectedEvidence && submittedQuery.trim()) {
+            try {
+              const highlightedUrl = await api.previewUrl(
+                workspaceId,
+                result.document_id,
+                page,
+                submittedQuery,
+                "highlighted",
+              );
+              loadedUrls.push(highlightedUrl);
+              setPreview(highlightedUrl);
+            } catch {
+              setPreviewError("高亮层暂时不可用，已显示基础页面。");
+            }
+          }
+        } else if (loadImage) {
+          const imageUrl = await loadImage;
+          loadedUrls.push(imageUrl);
+          if (previewController.signal.aborted) return;
+          setPreview(imageUrl);
+          setPreviewState("ready");
+        }
+      } catch (reason) {
+        if (previewController.signal.aborted) return;
+        setPreviewState("error");
+        setPreviewError(reason instanceof Error ? reason.message : "页面渲染失败。");
       }
-      setPreview(url);
-      setPreviewState("ready");
-    }).catch(() => {
-      if (active) setPreviewState("error");
-    });
+    })();
     return () => {
-      active = false;
-      if (nextUrl.startsWith("blob:")) URL.revokeObjectURL(nextUrl);
+      previewController.abort();
+      loadedUrls.forEach((url) => {
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      });
     };
-  }, [page, result, selectedEvidence, submittedQuery, workspaceId]);
+  }, [page, previewNonce, result, selectedEvidence, submittedQuery, workspaceId]);
 
   const changePage = (delta: number) => {
     if (!result || page === null) return;
@@ -138,6 +190,40 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
       setOpenError("来源当前不可访问，请同步后重新定位。");
     } finally {
       setOpening(false);
+    }
+  };
+
+  const prepareVision = async () => {
+    if (!result || visionPage === null) return;
+    setVisionLoading(true);
+    setVisionError("");
+    setVisionAnalysis(null);
+    try {
+      setVisionPreflight(await api.visionPreflight(workspaceId, result.document_id, visionPage));
+    } catch (reason) {
+      setVisionError(reason instanceof Error ? reason.message : "无法准备当前页面。");
+    } finally {
+      setVisionLoading(false);
+    }
+  };
+
+  const analyzeVision = async () => {
+    if (!result || visionPage === null || !visionPreflight) return;
+    setVisionLoading(true);
+    setVisionError("");
+    try {
+      const analysis = await api.analyzeVisionPage(
+        workspaceId,
+        result.document_id,
+        visionPage,
+        visionPrompt,
+        visionPreflight.requires_confirmation,
+      );
+      setVisionAnalysis(analysis);
+    } catch (reason) {
+      setVisionError(reason instanceof Error ? reason.message : "页面分析没有完成。");
+    } finally {
+      setVisionLoading(false);
     }
   };
 
@@ -185,6 +271,15 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
                 <button className="iconButton" disabled={page >= result.page_count} onClick={() => changePage(1)} aria-label="下一页" title="下一页"><ChevronRight size={18} /></button>
               </div>
               <PreviewCanvas preview={preview} state={previewState} alt={`${result.name} 第 ${page} 页`} />
+              {previewError && previewState === "ready" && <div className="previewNotice" role="status">{previewError}</div>}
+              {previewState === "error" && (
+                <div className="previewFallback" role="alert">
+                  <span>{previewError || "页面预览暂时不可用。"}</span>
+                  <button className="secondaryButton smallButton" onClick={() => setPreviewNonce((value) => value + 1)}>重试预览</button>
+                  <button className="textButton smallButton" onClick={() => document.getElementById("evidence-text")?.scrollIntoView({ block: "center" })}>查看文本证据</button>
+                  <button className="textButton smallButton" onClick={() => void openSource()}>打开原文件</button>
+                </div>
+              )}
             </section>
           ) : result.extension === ".pdf" ? (
             <div className="unlocatedNotice"><AlertTriangle size={17} />当前命中无法可靠定位到页码。</div>
@@ -200,7 +295,46 @@ export function EvidenceInspector({ onAdd, adding, actionError }: EvidenceInspec
             </div>
           )}
 
-          <section className="inspectorSection">
+          {visionPage !== null && result.indexing_state === "indexed" && (
+            <section className="visionAnalysis" aria-label="当前页视觉分析">
+              <div className="sectionHeading">
+                <div><ScanSearch size={16} /><h3>当前页分析</h3></div>
+                {visionPreflight && <span>{visionPreflight.mode === "vision" ? "视觉" : "OCR"}</span>}
+              </div>
+              {!visionPreflight ? (
+                <button className="secondaryButton smallButton" disabled={visionLoading} onClick={() => void prepareVision()}>
+                  {visionLoading ? <LoaderCircle className="spin" size={15} /> : <ScanSearch size={15} />}准备分析
+                </button>
+              ) : (
+                <>
+                  <div className="visionFacts">
+                    <span><strong>模型</strong>{visionPreflight.model}</span>
+                    <span><strong>图片</strong>{visionPreflight.width} × {visionPreflight.height} · {formatBytes(visionPreflight.image_size_bytes)}</span>
+                    <span><strong>费用</strong>{visionPreflight.cost_estimate_status === "unknown" ? "未知" : "按实际 token 统计"}</span>
+                  </div>
+                  {visionPreflight.warning && <div className="previewNotice" role="status">{visionPreflight.warning}</div>}
+                  <textarea aria-label="当前页分析问题" value={visionPrompt} maxLength={2000} onChange={(event) => setVisionPrompt(event.target.value)} />
+                  <div className="visionActions">
+                    <button className="textButton smallButton" disabled={visionLoading} onClick={() => void prepareVision()}>重新准备</button>
+                    <button className="primaryButton smallButton" disabled={visionLoading || !visionPrompt.trim()} onClick={() => void analyzeVision()}>
+                      {visionLoading ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}
+                      {visionPreflight.requires_confirmation ? "确认发送并分析" : "使用 OCR 文本"}
+                    </button>
+                  </div>
+                </>
+              )}
+              {visionError && <div className="inspectorActionError" role="alert"><AlertTriangle size={15} />{visionError}</div>}
+              {visionAnalysis && (
+                <div className="visionAnswer">
+                  <strong>{visionAnalysis.mode === "vision" ? "模型分析" : "OCR 回退"}</strong>
+                  <p>{visionAnalysis.answer}</p>
+                  {visionAnalysis.warning && <small>{visionAnalysis.warning}</small>}
+                </div>
+              )}
+            </section>
+          )}
+
+          <section className="inspectorSection" id="evidence-text">
             <h3>命中内容</h3>
             {selectedEvidence ? (
               <>

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import unquote, urlparse
@@ -13,6 +15,8 @@ from .desktop_client import LocalApiClient
 from .desktop_helpers import open_path
 from .packaging_smoke import run_v2_dependency_smoke
 from .utils import atomic_write_json, atomic_write_text, load_json
+
+_EXPORT_ARTIFACT_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 def ui_directory() -> Path:
@@ -39,6 +43,7 @@ class DesktopBridge:
     def __init__(self, client: LocalApiClient) -> None:
         self._client = client
         self._window: Any = None
+        self._saved_exports: dict[str, Path] = {}
 
     def _attach(self, window: Any) -> None:
         self._window = window
@@ -76,6 +81,55 @@ class DesktopBridge:
         path = Path(value).expanduser().resolve()
         atomic_write_text(path, content)
         return {"saved": True, "file": path.name}
+
+    def save_export_file(
+        self,
+        workspace_id: str,
+        artifact_id: str,
+        suggested_name: str,
+    ) -> dict[str, Any]:
+        if not _EXPORT_ARTIFACT_ID.fullmatch(artifact_id):
+            raise ValueError("Invalid export artifact ID")
+        if self._window is None:
+            return {"saved": False}
+        import webview
+
+        file_name = Path(suggested_name).name or "Octopus-research-bundle.zip"
+        if not file_name.casefold().endswith(".zip"):
+            file_name = f"{file_name}.zip"
+        selected = self._window.create_file_dialog(
+            webview.SAVE_DIALOG,
+            save_filename=file_name,
+        )
+        if not selected:
+            return {"saved": False}
+        value = selected[0] if isinstance(selected, (list, tuple)) else selected
+        destination = Path(value).expanduser().resolve()
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            self._client.download_export_artifact(
+                workspace_id,
+                artifact_id,
+                temporary,
+            )
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self._saved_exports[artifact_id] = destination
+        return {
+            "saved": True,
+            "file": destination.name,
+            "uri": destination.as_uri(),
+        }
+
+    def reveal_saved_file(self, artifact_id: str) -> dict[str, Any]:
+        if not _EXPORT_ARTIFACT_ID.fullmatch(artifact_id):
+            raise ValueError("Invalid export artifact ID")
+        path = self._saved_exports.get(artifact_id)
+        if path is None or not path.is_file():
+            raise FileNotFoundError("The saved export is unavailable")
+        open_path(path.parent)
+        return {"opened": True, "file": path.name}
 
     def open_uri(self, uri: str) -> dict[str, Any]:
         path = _file_uri_path(uri)

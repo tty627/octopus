@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { ApiError, api } from "../api";
 import { useAppStore } from "../store";
-import type { ServiceJob, Workspace } from "../types";
+import type { ServiceJob, Workspace, WorkspaceDocument } from "../types";
 import { documentQualityLabel, formatBytes, relativeTime } from "../utils";
 import {
   isActiveWorkspaceJob,
@@ -26,6 +26,7 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [confirmAIIndex, setConfirmAIIndex] = useState(false);
   const settledJob = useRef("");
   const jobStatuses = useRef(new Map<string, ServiceJob["status"]>());
   const documents = useQuery({
@@ -46,7 +47,10 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
     enabled: Boolean(workspaceId),
     refetchInterval: 5_000,
   });
-  const latestJob = latestWorkspaceJob(jobs.data ?? []);
+  const workspaceJobs = (jobs.data ?? []).filter((item) =>
+    item.kind === "workspace_sync" || item.kind === "workspace_rebuild"
+  );
+  const latestJob = latestWorkspaceJob(workspaceJobs);
   const activeJob = latestJob && isActiveWorkspaceJob(latestJob) ? latestJob : undefined;
   const failedJob = latestJob?.status === "failed" ? latestJob : undefined;
   const partialFailureCount = latestJob?.status === "succeeded"
@@ -94,7 +98,10 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
     onError: (reason) => setError(reason instanceof ApiError ? reason.message : "同步没有开始。"),
   });
   const aiRun = useMutation({
-    mutationFn: () => api.startAIIndex(workspaceId, 20),
+    mutationFn: (retryFailed: boolean) => api.startAIIndex(workspaceId, {
+      scope: "all",
+      retry_failed: retryFailed,
+    }),
     onSuccess: (job) => {
       rememberJob(job);
       void queryClient.invalidateQueries({ queryKey: ["ai-index", workspaceId] });
@@ -114,6 +121,9 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
   const health = workspace.health;
   const visibleFailureCount = partialFailureCount > 0 ? partialFailureCount : health.failed_count;
   const aiJob = jobs.data?.find((item) => item.kind === "workspace_ai_index" && (item.status === "queued" || item.status === "running"));
+  const aiPendingCalls = aiIndex.data?.estimated_calls ?? 0;
+  const aiFailedCount = (aiIndex.data?.failed_document_count ?? 0) +
+    (aiIndex.data?.failed_folder_count ?? 0);
 
   return (
     <div className="documentsPage">
@@ -132,14 +142,26 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
         <div className="healthLow"><strong>{health.low_quality_count}</strong><span>识别质量低</span></div>
         <div><strong>{health.metadata_only_count}</strong><span>仅文件信息</span></div>
         <div className="healthFailed"><strong>{health.failed_count}</strong><span>处理失败</span></div>
+        {(health.queued_count ?? 0) > 0 && <div><strong>{health.queued_count}</strong><span>等待处理</span></div>}
+        {(health.processing_count ?? 0) > 0 && <div><strong>{health.processing_count}</strong><span>处理中</span></div>}
       </div>
       <div className="syncLine"><CheckCircle2 size={15} />上次同步：{relativeTime(health.last_sync_at)}</div>
       {activeJob && <div className="jobStatusBox" role="status"><LoaderCircle className="spin" size={17} /><span>{workspaceJobProgressText(activeJob)}</span></div>}
       <section className="aiIndexPanel">
         <div className="settingsSectionTitle"><Sparkles size={18} /><div><h2>AI 资料索引</h2><span>{aiIndex.data ? `${aiIndex.data.indexed_document_count}/${aiIndex.data.document_count} 份资料卡，${aiIndex.data.indexed_folder_count}/${aiIndex.data.folder_count} 个文件夹卡` : "正在读取索引状态"}</span></div></div>
         <div className="aiIndexActions">
-          <span>{aiIndex.data?.estimated_calls ? `预计还需 ${aiIndex.data.estimated_calls} 次调用` : "AI 索引已是最新"}</span>
-          <button className="secondaryButton" disabled={Boolean(aiJob) || aiRun.isPending || !aiIndex.data?.estimated_calls} onClick={() => aiRun.mutate()}>{aiJob || aiRun.isPending ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}{aiJob ? "索引处理中" : "更新 AI 索引（每批 20 次）"}</button>
+          <span>{aiPendingCalls ? `预计调用 ${aiPendingCalls} 次；确认后将自动完成全部范围` : "AI 索引已是最新"}</span>
+          <div>
+            {confirmAIIndex && aiPendingCalls > 0 ? (
+              <>
+                <button className="primaryButton smallButton" disabled={Boolean(aiJob) || aiRun.isPending} onClick={() => { setConfirmAIIndex(false); aiRun.mutate(false); }}>确认并补全</button>
+                <button className="textButton smallButton" onClick={() => setConfirmAIIndex(false)}>取消</button>
+              </>
+            ) : (
+              <button className="secondaryButton" disabled={Boolean(aiJob) || aiRun.isPending || !aiPendingCalls} onClick={() => setConfirmAIIndex(true)}>{aiJob || aiRun.isPending ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}{aiJob ? "索引处理中" : "一键补全 AI 索引"}</button>
+            )}
+            {aiFailedCount > 0 && <button className="secondaryButton" disabled={Boolean(aiJob) || aiRun.isPending} onClick={() => aiRun.mutate(true)}><RotateCcw size={16} />单独重试失败项 ({aiFailedCount})</button>}
+          </div>
         </div>
       </section>
       {notice && <div className="successBox" role="status">{notice}</div>}
@@ -154,11 +176,11 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
           <div className="documentRow" key={document.document_id}>
             <File size={18} />
             <span className="documentIdentity"><strong>{document.name}</strong><small>{document.relative_path}</small></span>
-            <span className={`qualityBadge quality-${document.indexing_state === "failed" ? "failed" : document.indexing_state === "metadata_only" ? "metadata" : document.readability}`}>
-              {documentQualityLabel(document.indexing_state, document.readability)}
+            <span className={`qualityBadge quality-${document.processing_state === "failed" || document.indexing_state === "failed" ? "failed" : document.processing_state === "queued" || document.processing_state === "processing" ? "pending" : document.indexing_state === "metadata_only" ? "metadata" : document.readability}`} title={document.processing_error || ""}>
+              {processingLabel(document)}
             </span>
-            <span>{formatBytes(document.size_bytes)}</span>
-            <button className="iconButton" disabled={reprocess.isPending || Boolean(activeJob)} onClick={() => reprocess.mutate(document.document_id)} aria-label={`重新处理 ${document.name}`} title="重新处理"><RotateCcw size={16} /></button>
+            <span>{formatBytes(document.size_bytes)}{(document.ocr_pending_pages ?? 0) > 0 && <small className="ocrPending">{document.ocr_pending_pages} 页待 OCR</small>}</span>
+            <button className="iconButton" disabled={reprocess.isPending || document.processing_state === "processing"} onClick={() => reprocess.mutate(document.document_id)} aria-label={(document.ocr_pending_pages ?? 0) > 0 ? `继续 OCR ${document.name}` : `重新处理 ${document.name}`} title={(document.ocr_pending_pages ?? 0) > 0 ? "继续 OCR" : "重新处理"}><RotateCcw size={16} /></button>
           </div>
         ))}
       </section>
@@ -177,4 +199,12 @@ export function RepositoriesView({ workspace }: { workspace: Workspace }) {
       </details>
     </div>
   );
+}
+
+function processingLabel(document: WorkspaceDocument): string {
+  if (document.processing_state === "queued") return "等待处理";
+  if (document.processing_state === "processing") return "处理中";
+  if (document.processing_state === "failed") return "处理失败";
+  if ((document.ocr_pending_pages ?? 0) > 0) return `正文可用 · ${document.ocr_pending_pages} 页待 OCR`;
+  return documentQualityLabel(document.indexing_state, document.readability);
 }

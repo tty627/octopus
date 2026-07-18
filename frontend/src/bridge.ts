@@ -1,4 +1,4 @@
-import type { BootstrapPayload, PageId } from "./types";
+import type { BootstrapPayload, PageId, SavedExportFile } from "./types";
 
 interface NativeBridge {
   bootstrap: () => Promise<BootstrapPayload>;
@@ -7,6 +7,12 @@ interface NativeBridge {
     suggestedName: string,
     content: string,
   ) => Promise<{ saved: boolean; file?: string }>;
+  save_export_file: (
+    workspaceId: string,
+    artifactId: string,
+    suggestedName: string,
+  ) => Promise<SavedExportFile>;
+  reveal_saved_file: (artifactId: string) => Promise<{ opened: boolean; file?: string }>;
   open_uri: (uri: string) => Promise<{ opened: boolean; name: string }>;
   load_ui_state: () => Promise<Record<string, unknown>>;
   save_ui_state: (state: Record<string, unknown>) => Promise<{ saved: boolean }>;
@@ -85,6 +91,22 @@ export function saveBlobFile(name: string, content: Blob): Promise<boolean> {
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
   return Promise.resolve(true);
+}
+
+export async function saveExportFile(
+  workspaceId: string,
+  artifactId: string,
+  suggestedName: string,
+): Promise<SavedExportFile | null> {
+  const api = nativeApi();
+  if (!api?.save_export_file) return null;
+  return api.save_export_file(workspaceId, artifactId, suggestedName);
+}
+
+export async function revealSavedFile(artifactId: string): Promise<boolean> {
+  const api = nativeApi();
+  if (!api?.reveal_saved_file) return false;
+  return (await api.reveal_saved_file(artifactId)).opened;
 }
 
 export async function openLocalUri(uri: string): Promise<void> {

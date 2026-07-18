@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import time
 from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
@@ -10,6 +12,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from .models import (
+    AIUsage,
     ExtractedDocument,
     ExtractionEvidence,
     GeneratedSummary,
@@ -19,8 +22,13 @@ from .models import (
     RepositoryIdentity,
     utc_now,
 )
-from .prompts import PROMPT_VERSION, RESEARCH_TASK_PROMPT
-from .providers import create_provider
+from .prompts import PROMPT_VERSION, RESEARCH_ANSWER_PROMPT, RESEARCH_TASK_PROMPT
+from .providers import (
+    ProviderAuthError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
+    create_provider,
+)
 from .utils import atomic_write_json
 from .workspace_sources import EvidenceLocator, SourceRef
 from .workspace_tasks_v2 import (
@@ -124,6 +132,196 @@ class ResearchTaskProposal(OctopusModel):
     gaps: list[str] = Field(default_factory=list)
     slots: list[ResearchSlotProposal] = Field(default_factory=list)
     candidates: list[ResearchCandidate] = Field(default_factory=list)
+
+
+class ResearchCitation(OctopusModel):
+    citation_id: str
+    document_id: str
+    name: str
+    relative_path: str
+    page_number: int | None = None
+    locator: EvidenceLocator | None = None
+    excerpt: str = ""
+
+
+def _research_queries(question: str) -> list[str]:
+    normalized = " ".join(question.split()).strip()
+    fragments = [
+        " ".join(value.split()).strip(" ，。；;：:！？!?")
+        for value in re.split(r"[，。；;：:！？!?]|以及|并且|同时", normalized)
+    ]
+    values: list[str] = []
+    for value in [normalized, *fragments]:
+        if len(value) < 2 or value in values:
+            continue
+        values.append(value)
+    return values[:4]
+
+
+def run_workspace_research(
+    workspace_id: str,
+    question: str,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    limit: int = 50,
+    search_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    workspace = get_workspace(workspace_id)
+    store = WorkspaceStore(workspace)
+    queries = _research_queries(question)
+    if progress:
+        progress({"phase": "understanding", "completed": 0, "total": len(queries)})
+
+    by_document: dict[str, WorkspaceSearchResult] = {}
+    options = dict(search_options or {})
+    for index, query in enumerate(queries, start=1):
+        if progress:
+            progress(
+                {
+                    "phase": "retrieving",
+                    "completed": index - 1,
+                    "total": len(queries),
+                    "current_query": query,
+                }
+            )
+        report = store.search(query, limit=limit, mode="local", **options)
+        for result in report.results:
+            existing = by_document.get(result.document_id)
+            if existing is None:
+                by_document[result.document_id] = result
+                continue
+            evidence = [
+                existing.best_evidence,
+                *existing.additional_evidence,
+                result.best_evidence,
+                *result.additional_evidence,
+            ]
+            unique = []
+            seen: set[tuple[int | None, str]] = set()
+            for item in evidence:
+                key = (item.page_number, item.excerpt)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(item)
+            by_document[result.document_id] = existing.model_copy(
+                update={"best_evidence": unique[0], "additional_evidence": unique[1:3]}
+            )
+    results = [
+        result.model_copy(update={"rank": rank})
+        for rank, result in enumerate(by_document.values(), start=1)
+    ][:limit]
+    citations = [
+        ResearchCitation(
+            citation_id=f"R{index}",
+            document_id=result.document_id,
+            name=result.name,
+            relative_path=result.relative_path,
+            page_number=result.best_evidence.page_number,
+            locator=result.best_evidence.locator or result.locator,
+            excerpt=result.best_evidence.excerpt,
+        )
+        for index, result in enumerate(results, start=1)
+    ]
+    if progress:
+        progress(
+            {
+                "phase": "composing",
+                "completed": len(queries),
+                "total": len(queries),
+                "evidence_count": len(citations),
+            }
+        )
+
+    actual_mode = "research"
+    degradation_reason = ""
+    warnings: list[str] = []
+    answer = (
+        f"在当前资料空间中找到 {len(results)} 份相关资料。"
+        if results
+        else "当前资料空间没有找到足以回答该问题的证据。"
+    )
+    usage: dict[str, Any] = {
+        "calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "duration_ms": 0,
+        "estimated_cost": None,
+    }
+    if results:
+        try:
+            provider = create_provider(_config_for(workspace), require_network=True)
+            output = provider._json_call(  # type: ignore[attr-defined]
+                "workspace_research",
+                RESEARCH_ANSWER_PROMPT,
+                {
+                    "question": question,
+                    "subqueries": queries,
+                    "candidates": [item.model_dump(mode="json") for item in citations],
+                },
+            )
+            allowed = {item.citation_id for item in citations}
+            raw_ids = output.get("citation_ids", [])
+            citation_ids = (
+                [str(value) for value in raw_ids if str(value) in allowed]
+                if isinstance(raw_ids, list)
+                else []
+            )
+            candidate_answer = str(output.get("answer", "")).strip()
+            invalid_refs = {
+                match for match in re.findall(r"\[([A-Za-z]+\d+)\]", candidate_answer)
+                if match not in allowed
+            }
+            if invalid_refs:
+                raise ValueError("AI answer cited evidence outside the supplied candidates")
+            if candidate_answer:
+                answer = candidate_answer
+            raw_warnings = output.get("warnings", [])
+            if isinstance(raw_warnings, list):
+                warnings.extend(str(value) for value in raw_warnings if str(value))
+            if citation_ids and not any(f"[{value}]" in answer for value in citation_ids):
+                answer = f"{answer}\n\n引用：" + " ".join(f"[{value}]" for value in citation_ids)
+            provider_usage = getattr(provider, "usage", None)
+            if provider_usage is not None:
+                usage = provider_usage.model_dump(mode="json")
+        except Exception as error:
+            actual_mode = "degraded"
+            degradation_reason = type(error).__name__
+            warnings.append("辅助模型不可用，本次保留本地检索结果。")
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    usage["duration_ms"] = max(int(usage.get("duration_ms", 0)), duration_ms)
+    result_payload = {
+        "query": question.strip(),
+        "requested_mode": "research",
+        "actual_mode": actual_mode,
+        "degradation_reason": degradation_reason,
+        "answer": answer,
+        "results": [item.model_dump(mode="json") for item in results],
+        "candidate_count": len(results),
+        "duration_ms": duration_ms,
+        "subqueries": queries,
+        "citations": [item.model_dump(mode="json") for item in citations],
+        "warnings": warnings,
+        "usage": usage,
+        "cost_known": usage.get("estimated_cost") is not None,
+    }
+    if progress:
+        progress(
+            {
+                "phase": "completed",
+                "completed": len(queries),
+                "total": len(queries),
+                "evidence_count": len(citations),
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "duration_ms": duration_ms,
+                "estimated_cost": usage.get("estimated_cost"),
+                "cost_known": usage.get("estimated_cost") is not None,
+            }
+        )
+    return result_payload
 
 
 def _config_for(workspace: GlobalWorkspace) -> RepositoryConfig:
@@ -388,26 +586,61 @@ def _store_folder_card(connection: Any, card: AIFolderCard) -> None:
 
 def run_ai_index(
     workspace_id: str,
-    limit: int = 20,
+    limit: int | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    scope: Literal["all", "documents", "folders"] = "all",
+    max_calls: int | None = None,
+    retry_failed: bool = False,
 ) -> dict[str, Any]:
+    if scope not in {"all", "documents", "folders"}:
+        raise ValueError("Unknown AI index scope")
     workspace = get_workspace(workspace_id)
     store = WorkspaceStore(workspace)
-    provider = create_provider(_config_for(workspace), require_network=True)
     status = ai_index_status(workspace_id)
-    total = status.estimated_calls
+    requested_limit = max_calls if max_calls is not None else limit
+    configured = _config_for(workspace)
+    if requested_limit is not None:
+        configured.ai_policy.max_calls_per_run = requested_limit
+    else:
+        configured.ai_policy.max_calls_per_run = max(
+            1,
+            status.estimated_calls
+            + (status.failed_document_count + status.failed_folder_count if retry_failed else 0),
+        )
+    provider = create_provider(configured, require_network=True)
     completed = 0
     errors: list[str] = []
+    stopped_early = False
+    started = time.perf_counter()
 
-    def report(phase: str, current: str = "") -> None:
+    def usage_payload() -> dict[str, Any]:
+        raw_usage = getattr(provider, "usage", None)
+        usage = raw_usage if isinstance(raw_usage, AIUsage) else AIUsage()
+        payload = usage.model_dump(mode="json")
+        payload["duration_ms"] = max(
+            int(payload.get("duration_ms", 0)),
+            int((time.perf_counter() - started) * 1000),
+        )
+        return payload
+
+    def report(phase: str, current: str = "", total: int = 0) -> None:
         if progress:
+            usage = usage_payload()
             progress(
                 {
                     "phase": phase,
                     "total": total,
                     "completed": completed,
-                    "current": current,
-                    "errors": len(errors),
+                    "failed": len(errors),
+                    "current_file": current,
+                    "calls": usage["calls"],
+                    "input_tokens": usage["input_tokens"],
+                    "output_tokens": usage["output_tokens"],
+                    "total_tokens": usage["total_tokens"],
+                    "duration_ms": usage["duration_ms"],
+                    "estimated_cost": usage["estimated_cost"],
+                    "cost_known": usage["estimated_cost"] is not None,
                 }
             )
 
@@ -426,14 +659,33 @@ def run_ai_index(
             if (
                 card is None
                 or str(card["content_hash"]) != str(row["content_hash"])
-                or str(card["status"]) == "failed"
+                or (retry_failed and str(card["status"]) == "failed")
             ):
                 pending_documents.append(row)
-        pending_documents = pending_documents[: max(0, limit)]
-        report("documents")
+        if scope == "folders":
+            pending_documents = []
+        folders = _folder_paths(store, connection)
+        existing_folders = {
+            str(row["folder_path"]): row
+            for row in connection.execute("SELECT * FROM ai_folder_cards").fetchall()
+        }
+        pending_folders = [
+            folder
+            for folder in folders
+            if folder not in existing_folders
+            or str(existing_folders[folder]["fingerprint"])
+            != _folder_fingerprint(connection, folder)
+            or (retry_failed and str(existing_folders[folder]["status"]) == "failed")
+        ]
+        if scope == "documents":
+            pending_folders = []
+        total = len(pending_documents) + len(pending_folders)
+        call_limit = total if requested_limit is None else min(total, max(0, requested_limit))
+        pending_documents = pending_documents[:call_limit]
+        report("documents", total=total)
         for row in pending_documents:
             document_id = str(row["document_id"])
-            report("document", document_id)
+            report("document", str(row["document_id"]), total)
             try:
                 value = _document_input(connection, document_id)
                 if value is None:
@@ -466,23 +718,23 @@ def run_ai_index(
                         error=str(error)[:500],
                     ),
                 )
-        remaining = max(0, limit - completed)
-        if remaining:
-            folders = _folder_paths(store, connection)
-            existing = {
-                str(row["folder_path"]): row
-                for row in connection.execute("SELECT * FROM ai_folder_cards").fetchall()
-            }
-            pending_folders = [
-                folder
-                for folder in folders
-                if folder not in existing
-                or str(existing[folder]["fingerprint"]) != _folder_fingerprint(connection, folder)
-            ]
-            for folder in sorted(pending_folders, key=lambda value: value.count("/"), reverse=True)[
-                :remaining
-            ]:
-                report("folder", folder)
+                connection.commit()
+                if isinstance(
+                    error,
+                    (ProviderAuthError, ProviderQuotaError, ProviderRateLimitError),
+                ):
+                    stopped_early = True
+                    break
+            else:
+                connection.commit()
+        remaining = max(0, call_limit - len(pending_documents))
+        if remaining and not stopped_early:
+            for folder in sorted(
+                pending_folders,
+                key=lambda value: value.count("/"),
+                reverse=True,
+            )[:remaining]:
+                report("folder", folder, total)
                 fingerprint = _folder_fingerprint(connection, folder)
                 prefix = "" if folder == "." else folder.rstrip("/") + "/"
                 child_rows = connection.execute(
@@ -537,6 +789,15 @@ def run_ai_index(
                             error=str(error)[:500],
                         ),
                     )
+                    connection.commit()
+                    if isinstance(
+                        error,
+                        (ProviderAuthError, ProviderQuotaError, ProviderRateLimitError),
+                    ):
+                        stopped_early = True
+                        break
+                else:
+                    connection.commit()
         connection.execute(
             "INSERT INTO workspace_metadata(key, value) "
             "VALUES('ai_index_last_run', ?) "
@@ -550,12 +811,17 @@ def run_ai_index(
             ("; ".join(errors)[:1000],),
         )
         connection.commit()
-    report("completed")
+    report("completed", total=total)
+    usage = usage_payload()
     return {
         "workspace_id": workspace_id,
         "completed": completed,
         "estimated": total,
+        "failed": len(errors),
         "errors": errors,
+        "stopped_early": stopped_early,
+        "usage": usage,
+        "cost_known": usage["estimated_cost"] is not None,
         "status": ai_index_status(workspace_id).model_dump(mode="json"),
     }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -256,9 +257,71 @@ def test_webview_bridge_only_exposes_whitelisted_public_state() -> None:
         "choose_directory",
         "load_ui_state",
         "open_uri",
+        "reveal_saved_file",
+        "save_export_file",
         "save_text_file",
         "save_ui_state",
     }
+
+
+def test_export_save_cancel_overwrite_and_temp_cleanup(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_id = "a" * 32
+    downloads: list[Any] = []
+
+    class ArtifactClient:
+        base_url = "http://127.0.0.1:9876"
+        token = "memory-token"
+
+        def download_export_artifact(
+            self,
+            workspace_id: str,
+            received_artifact_id: str,
+            destination: Any,
+        ) -> int:
+            downloads.append((workspace_id, received_artifact_id, destination))
+            destination.write_bytes(b"new archive")
+            return len(b"new archive")
+
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(SAVE_DIALOG="save"))
+    client = ArtifactClient()
+    bridge = DesktopBridge(client)  # type: ignore[arg-type]
+    bridge._attach(SimpleNamespace(create_file_dialog=lambda *_, **__: None))
+    assert bridge.save_export_file("workspace", artifact_id, "research.zip") == {
+        "saved": False
+    }
+    assert downloads == []
+
+    destination = tmp_path / "research.zip"
+    destination.write_bytes(b"old archive")
+    bridge._attach(
+        SimpleNamespace(create_file_dialog=lambda *_, **__: [str(destination)])
+    )
+    saved = bridge.save_export_file("workspace", artifact_id, "research.zip")
+    assert saved["saved"] is True
+    assert saved["file"] == "research.zip"
+    assert destination.read_bytes() == b"new archive"
+    assert not list(tmp_path.glob(".research.zip.*.tmp"))
+
+    class FailingClient(ArtifactClient):
+        def download_export_artifact(self, *args: Any) -> int:
+            destination_path = args[2]
+            destination_path.write_bytes(b"partial")
+            raise OSError("disk full")
+
+    failing = DesktopBridge(FailingClient())  # type: ignore[arg-type]
+    failing._attach(
+        SimpleNamespace(create_file_dialog=lambda *_, **__: [str(destination)])
+    )
+    with pytest.raises(OSError, match="disk full"):
+        failing.save_export_file("workspace", "b" * 32, "research.zip")
+    assert destination.read_bytes() == b"new archive"
+    assert not list(tmp_path.glob(".research.zip.*.tmp"))
+
+    with pytest.raises(ValueError, match="Invalid export artifact ID"):
+        bridge.save_export_file("workspace", "../source", "research.zip")
 
 
 def test_webview_bridge_persists_v1_and_v2_navigation_state() -> None:

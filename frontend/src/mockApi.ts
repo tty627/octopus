@@ -1,6 +1,7 @@
 import type {
   AISettingsInputV2,
   AISettingsV2,
+  AIProviderPreset,
   SearchReportV2,
   SearchResultV2,
   ServiceJob,
@@ -187,16 +188,63 @@ let aiSettings: AISettingsV2 = {
   workspace_id: workspace.workspace_id,
   enabled: false,
   provider: "deepseek",
+  preset: "deepseek",
   base_url: "https://api.deepseek.com",
   model: "deepseek-v4-flash",
   credential_configured: false,
   credential_source: "none",
   credential_error: "",
   vision_enabled: false,
+  capabilities: {
+    text: true,
+    structured_output: true,
+    vision: false,
+    file_upload: false,
+  },
 };
+
+const providerPresets: AIProviderPreset[] = [
+  {
+    preset: "deepseek",
+    label: "DeepSeek",
+    provider: "deepseek",
+    base_url: "https://api.deepseek.com",
+    capability_hints: {
+      text: true,
+      structured_output: true,
+      vision: false,
+      file_upload: false,
+    },
+  },
+  {
+    preset: "glm",
+    label: "智谱 GLM",
+    provider: "openai_compatible",
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    capability_hints: {
+      text: true,
+      structured_output: "连接测试确认",
+      vision: "取决于所选模型",
+      file_upload: false,
+    },
+  },
+  {
+    preset: "custom",
+    label: "OpenAI Compatible",
+    provider: "openai_compatible",
+    base_url: "",
+    capability_hints: {
+      text: "连接测试确认",
+      structured_output: "连接测试确认",
+      vision: "连接测试确认",
+      file_upload: false,
+    },
+  },
+];
 
 let tasks: WorkspaceTask[] = [];
 const serviceJobs: ServiceJob[] = [];
+const exportArtifacts = new Map<string, Blob>();
 
 let aiIndex: AIIndexStatus = {
   workspace_id: workspace.workspace_id,
@@ -352,6 +400,39 @@ function job(): ServiceJob {
   return value;
 }
 
+function backgroundJob(
+  kind: ServiceJob["kind"],
+  result: ServiceJob["result"],
+  progress: ServiceJob["result"]["progress"],
+): ServiceJob {
+  const createdAt = new Date().toISOString();
+  const value: ServiceJob = {
+    job_id: crypto.randomUUID(),
+    repository_id: workspace.workspace_id,
+    kind,
+    status: "queued",
+    created_at: createdAt,
+    started_at: "",
+    finished_at: "",
+    result: { progress },
+    error_code: "",
+    error_message: "",
+  };
+  serviceJobs.unshift(value);
+  window.setTimeout(() => {
+    const index = serviceJobs.findIndex((item) => item.job_id === value.job_id);
+    if (index < 0 || serviceJobs[index]?.status === "canceled") return;
+    serviceJobs[index] = {
+      ...value,
+      status: "succeeded",
+      started_at: createdAt,
+      finished_at: new Date().toISOString(),
+      result,
+    };
+  }, 80);
+  return value;
+}
+
 export function mockPreviewUrl(documentId: string, page: number): string {
   const document = documents.find((item) => item.document_id === documentId);
   const title = document?.name ?? "页面证据";
@@ -373,6 +454,12 @@ export function mockResearchPackBlob(task: WorkspaceTask, options: ResearchPackE
     task,
     options,
   }, null, 2)], { type: "application/zip" });
+}
+
+export function mockExportArtifactBlob(artifactId: string): Blob {
+  const artifact = exportArtifacts.get(artifactId);
+  if (!artifact) throw new Error("导出工件不存在或已过期");
+  return artifact;
 }
 
 export async function mockRequest<T>(
@@ -411,6 +498,87 @@ export async function mockRequest<T>(
     const request = body as { query: string; mode: "local" | "assisted" };
     return searchReport(request.query, request.mode) as T;
   }
+  if (path === "/v2/ai-provider-presets" && method === "GET") {
+    return structuredClone(providerPresets) as T;
+  }
+  if (path.endsWith("/research") && method === "POST") {
+    const request = body as { question: string };
+    const results = searchReport(request.question, "local").results;
+    const citations = results.map((item, index) => ({
+      citation_id: `R${index + 1}`,
+      document_id: item.document_id,
+      name: item.name,
+      relative_path: item.relative_path,
+      page_number: item.best_evidence.page_number,
+      locator: item.best_evidence.locator ?? null,
+      excerpt: item.best_evidence.excerpt,
+    }));
+    return backgroundJob(
+      "workspace_research",
+      {
+        query: request.question,
+        requested_mode: "research",
+        actual_mode: aiSettings.enabled ? "research" : "degraded",
+        degradation_reason: aiSettings.enabled ? "" : "assisted_search_not_configured",
+        answer: results.length
+          ? `根据当前资料，相关结论可由 [R1] 支持。`
+          : "当前资料空间没有找到足以回答该问题的证据。",
+        results,
+        candidate_count: results.length,
+        duration_ms: 120,
+        subqueries: [request.question],
+        citations,
+        warnings: aiSettings.enabled ? [] : ["辅助模型不可用，本次保留本地检索结果。"],
+        usage: { calls: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        cost_known: false,
+        progress: {
+          phase: "completed",
+          completed: 1,
+          total: 1,
+          evidence_count: results.length,
+          cost_known: false,
+        },
+      },
+      { phase: "understanding", completed: 0, total: 3 },
+    ) as T;
+  }
+  if (path.endsWith("/task-proposals/jobs") && method === "POST") {
+    const request = body as { goal: string; title?: string };
+    const candidates = allResults.slice(0, 3).map((item) => ({
+      candidate_id: `${item.document_id}-0`,
+      document_id: item.document_id,
+      content_hash: item.content_hash,
+      name: item.name,
+      relative_path: item.relative_path,
+      page_number: item.best_evidence.page_number,
+      locator: item.best_evidence.locator ?? null,
+      excerpt: item.best_evidence.excerpt,
+      reason: item.best_evidence.reason,
+      quality_score: item.best_evidence.quality_score,
+      source_ref: item.source_ref ?? null,
+      overview: item.overview,
+    }));
+    const proposal: ResearchTaskProposal = {
+      title: request.title || "研究资料包",
+      goal: request.goal,
+      summary: `围绕“${request.goal}”整理了 ${candidates.length} 条候选证据。`,
+      warnings: [],
+      gaps: [],
+      candidates,
+      slots: [{
+        name: "核心证据",
+        description: "直接支持目标的证据。",
+        required: true,
+        candidate_ids: candidates.map((item) => item.candidate_id),
+        rationales: {},
+      }],
+    };
+    return backgroundJob(
+      "task_proposal",
+      { proposal, progress: { phase: "completed", completed: 3, total: 3 } },
+      { phase: "understanding", completed: 0, total: 3 },
+    ) as T;
+  }
   if (path.endsWith("/task-proposals") && method === "POST") {
     const request = body as { goal: string; title?: string };
     const candidates = allResults.slice(0, 3).flatMap((item) => [{
@@ -444,7 +612,16 @@ export async function mockRequest<T>(
   if (path.endsWith("/ai-settings/test") && method === "POST") {
     const request = body as AISettingsInputV2;
     const configured = Boolean(request.api_key || aiSettings.credential_configured);
-    return { ok: configured, code: configured ? "connected" : "key_not_configured", message: configured ? `已连接 ${request.model}。` : "请先填写 API Key。" } as T;
+    const capabilities = {
+      ...(aiSettings.capabilities ?? { text: true, structured_output: true, vision: false, file_upload: false }),
+      vision: request.preset === "glm" && request.model.toLocaleLowerCase().endsWith("v"),
+    };
+    return {
+      ok: configured,
+      code: configured ? "connected" : "key_not_configured",
+      message: configured ? `已连接 ${request.model}。` : "请先填写 API Key。",
+      capabilities: configured ? capabilities : undefined,
+    } as T;
   }
   if (path.endsWith("/ai-settings") && method === "GET") return structuredClone(aiSettings) as T;
   if (path.endsWith("/ai-settings") && method === "PUT") {
@@ -464,10 +641,82 @@ export async function mockRequest<T>(
     aiSettings.vision_enabled = value;
     return { workspace_id: workspace.workspace_id, vision_enabled: value } as T;
   }
+  if (/\/documents\/[^/]+\/vision\/preflight$/.test(path) && method === "POST") {
+    const request = body as { page_number: number };
+    const canSend = Boolean(aiSettings.enabled && aiSettings.vision_enabled && aiSettings.capabilities?.vision);
+    return {
+      workspace_id: workspace.workspace_id,
+      document_id: path.split("/").at(-3) ?? "",
+      page_number: request.page_number,
+      model: aiSettings.model,
+      mode: canSend ? "vision" : "ocr_fallback",
+      image_size_bytes: 184_320,
+      width: 1200,
+      height: 1600,
+      max_edge: 1600,
+      pricing_configured: false,
+      cost_estimate_status: "unknown",
+      requires_confirmation: canSend,
+      warning: canSend ? "" : "当前模型未通过视觉能力测试，本次只使用本地 OCR 文本。",
+    } as T;
+  }
+  if (/\/documents\/[^/]+\/vision\/analyze$/.test(path) && method === "POST") {
+    const request = body as { page_number: number; confirm_image_send: boolean };
+    const canSend = Boolean(aiSettings.enabled && aiSettings.vision_enabled && aiSettings.capabilities?.vision);
+    return {
+      workspace_id: workspace.workspace_id,
+      document_id: path.split("/").at(-3) ?? "",
+      page_number: request.page_number,
+      model: aiSettings.model,
+      mode: canSend && request.confirm_image_send ? "vision" : "ocr_fallback",
+      image_size_bytes: 184_320,
+      width: 1200,
+      height: 1600,
+      max_edge: 1600,
+      pricing_configured: false,
+      cost_estimate_status: "unknown",
+      requires_confirmation: canSend,
+      warning: canSend ? "" : "已使用当前页 OCR 文本。",
+      answer: canSend ? "页面包含一张研究流程图，并标出了证据核验节点。" : "当前页 OCR 文本：研究流程与证据核验。",
+      usage: { calls: canSend ? 1 : 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, duration_ms: 80, estimated_cost: null },
+      cost_known: false,
+    } as T;
+  }
   if (path.endsWith("/tasks") && method === "GET") return summaries() as T;
   if (path.endsWith("/tasks") && method === "POST") {
     const request = body as { title: string; goal: string; template_id?: TaskTemplateId };
     return createTask(request.title, request.goal, request.template_id) as T;
+  }
+  const exportMatch = path.match(/\/tasks\/([^/]+)\/exports$/);
+  if (exportMatch && method === "POST") {
+    const task = tasks.find((item) => item.task_id === exportMatch[1]);
+    if (!task) throw new Error("任务不存在");
+    const exportOptions = body as ResearchPackExportRequest;
+    const includeSources = exportOptions.include_sources;
+    const included = includeSources
+      ? task.items.filter((item) => item.review_state === "confirmed" && item.freshness_status === "current").length
+      : 0;
+    const artifactId = crypto.randomUUID().replaceAll("-", "");
+    exportArtifacts.set(artifactId, mockResearchPackBlob(task, exportOptions));
+    return backgroundJob(
+      "task_export",
+      {
+        artifact_id: artifactId,
+        workspace_id: workspace.workspace_id,
+        file_name: `${task.title}.zip`,
+        size_bytes: 2048,
+        sha256: "mock-sha256",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+        included_source_count: included,
+        skipped_source_count: task.items.length - included,
+        warnings: task.items.some((item) => item.review_state !== "confirmed")
+          ? ["部分来源尚未人工核验，原件未复制。"]
+          : [],
+        progress: { phase: "completed", completed: task.items.length, total: task.items.length },
+      },
+      { phase: "verifying", completed: 0, total: task.items.length },
+    ) as T;
   }
   if (path.endsWith("/changes") && method === "GET") return structuredClone(workspaceChanges) as T;
   const taskMatch = path.match(/\/tasks\/([^/]+)(?:\/(markdown|archive|revalidate))?$/);
@@ -518,8 +767,14 @@ export async function mockRequest<T>(
     return serviceJobs.filter((item) => !requestedWorkspace || item.repository_id === requestedWorkspace) as T;
   }
   if (path.startsWith("/v2/jobs/")) {
-    const jobId = path.slice("/v2/jobs/".length);
+    const cancel = path.endsWith("/cancel");
+    const jobId = path.slice("/v2/jobs/".length).replace(/\/cancel$/, "");
     const existing = serviceJobs.find((item) => item.job_id === jobId);
+    if (existing && cancel && method === "POST") {
+      existing.status = "canceled";
+      existing.finished_at = new Date().toISOString();
+      return existing as T;
+    }
     if (existing) return existing as T;
     throw new Error("后台任务不存在");
   }

@@ -10,6 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
+from .cancellation import OperationCancelledError
 from .config import load_global_config, load_repository_config, runtime_jobs_path
 from .engine import UpdateEngine
 from .models import JobStatus, ServiceJob, utc_now
@@ -26,6 +27,8 @@ JobKind = Literal[
     "workspace_sync",
     "workspace_rebuild",
     "workspace_ai_index",
+    "workspace_research",
+    "task_proposal",
     "task_export",
 ]
 
@@ -37,7 +40,7 @@ TERMINAL_JOB_STATUSES = {
 }
 
 
-class JobCancelledError(RuntimeError):
+class JobCancelledError(OperationCancelledError):
     pass
 
 

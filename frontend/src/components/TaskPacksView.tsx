@@ -6,6 +6,7 @@ import {
   Check,
   BookOpen,
   Download,
+  ExternalLink,
   FileArchive,
   FilePlus2,
   FolderOpen,
@@ -18,7 +19,14 @@ import {
   Trash2,
 } from "lucide-react";
 import { ApiError, api } from "../api";
-import { saveBlobFile, saveTextFile } from "../bridge";
+import {
+  openLocalUri,
+  revealSavedFile,
+  saveBlobFile,
+  saveExportFile,
+  saveTextFile,
+} from "../bridge";
+import { waitForJob } from "../jobs";
 import {
   clearLocalDraft,
   loadLocalDraft,
@@ -29,7 +37,9 @@ import { flushActiveTask } from "../taskPersistence";
 import type {
   CitationRecord,
   CitationStyle,
+  ExportArtifact,
   ResearchTaskProposal,
+  ServiceJob,
   TaskTemplateId,
   WorkspaceTaskItem,
   WorkspaceTaskSlot,
@@ -62,12 +72,15 @@ export function TaskPacksView() {
   const [goal, setGoal] = useState("");
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [savedExport, setSavedExport] = useState<ExportArtifact | null>(null);
+  const [savedExportName, setSavedExportName] = useState("");
   const [includeSources, setIncludeSources] = useState(false);
   const [revalidating, setRevalidating] = useState(false);
   const [proposal, setProposal] = useState<ResearchTaskProposal | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [returningToList, setReturningToList] = useState(false);
   const [resolvingConflict, setResolvingConflict] = useState(false);
+  const [openedEvidence, setOpenedEvidence] = useState<Set<string>>(new Set());
   const activationSequence = useRef(0);
   const summaries = useQuery({
     queryKey: ["tasks", workspaceId],
@@ -80,6 +93,9 @@ export function TaskPacksView() {
     setTitle("新的文献综述");
     setGoal("");
     setError("");
+    setSavedExport(null);
+    setSavedExportName("");
+    setOpenedEvidence(new Set());
   }, [workspaceId]);
   const create = useMutation({
     mutationFn: ({ sourceWorkspaceId, taskTitle, taskGoal, template }: {
@@ -108,7 +124,20 @@ export function TaskPacksView() {
     },
   });
   const propose = useMutation({
-    mutationFn: () => api.createResearchProposal(workspaceId, goal, title, templateId),
+    mutationFn: async () => {
+      const started = await api.startResearchProposal(workspaceId, goal, title, templateId);
+      queryClient.setQueryData<ServiceJob[]>(["jobs", workspaceId], (current = []) => [
+        started,
+        ...current.filter((item) => item.job_id !== started.job_id),
+      ]);
+      const completed = await waitForJob(started, {
+        onUpdate: (job) => queryClient.setQueryData<ServiceJob[]>(
+          ["jobs", workspaceId],
+          (current = []) => [job, ...current.filter((item) => item.job_id !== job.job_id)],
+        ),
+      });
+      return completed.result.proposal as ResearchTaskProposal;
+    },
     onSuccess: (value) => { setProposal(value); setError(""); },
     onError: (reason) => setError(reason instanceof ApiError ? reason.message : "AI 资料提案生成失败。"),
   });
@@ -270,13 +299,42 @@ export function TaskPacksView() {
       const current = useAppStore.getState();
       if (current.workspaceId !== sourceWorkspaceId || current.activeTask?.task_id !== sourceTaskId) return;
       const citationStyle = latest.citation_style ?? "gb-t-7714-2015";
-      const pack = await api.taskExport(latest, {
+      const started = await api.startTaskExport(latest, {
         citation_style: citationStyle,
         include_sources: includeSources,
       });
+      queryClient.setQueryData<ServiceJob[]>(["jobs", sourceWorkspaceId], (currentJobs = []) => [
+        started,
+        ...currentJobs.filter((item) => item.job_id !== started.job_id),
+      ]);
+      const completed = await waitForJob(started, {
+        onUpdate: (job) => queryClient.setQueryData<ServiceJob[]>(
+          ["jobs", sourceWorkspaceId],
+          (currentJobs = []) => [
+            job,
+            ...currentJobs.filter((item) => item.job_id !== job.job_id),
+          ],
+        ),
+      });
+      const artifact = completed.result as unknown as ExportArtifact;
       const afterExport = useAppStore.getState();
       if (afterExport.workspaceId !== sourceWorkspaceId || afterExport.activeTask?.task_id !== sourceTaskId) return;
-      await saveBlobFile(`${safeFileName(latest.title)}.zip`, pack);
+      const suggestedName = artifact.file_name || `${safeFileName(latest.title)}.zip`;
+      const nativeResult = await saveExportFile(
+        sourceWorkspaceId,
+        artifact.artifact_id,
+        suggestedName,
+      );
+      if (nativeResult === null) {
+        const pack = await api.exportArtifact(sourceWorkspaceId, artifact.artifact_id);
+        await saveBlobFile(suggestedName, pack);
+        setSavedExportName(suggestedName);
+      } else if (!nativeResult.saved) {
+        return;
+      } else {
+        setSavedExportName(nativeResult.file || suggestedName);
+      }
+      setSavedExport(artifact);
     } catch (reason) {
       if (useAppStore.getState().workspaceId !== sourceWorkspaceId) return;
       setError(reason instanceof ApiError ? reason.message : "研究资料包导出没有完成。 ");
@@ -375,6 +433,50 @@ export function TaskPacksView() {
     item.source_status === "source_unconfirmed" ||
     hasFreshnessIssue(item.freshness_status)
   ).length;
+  const unavailableCount = task.items.filter((item) =>
+    item.source_status === "source_unconfirmed" ||
+    item.freshness_status === "missing" ||
+    item.freshness_status === "unavailable"
+  ).length;
+  const changedCount = task.items.filter((item) => hasFreshnessIssue(item.freshness_status) &&
+    item.freshness_status !== "missing" && item.freshness_status !== "unavailable").length;
+  const unverifiedCount = task.items.filter((item) => item.review_state !== "confirmed").length;
+  const eligibleSourceCount = task.items.filter((item) =>
+    item.review_state === "confirmed" &&
+    item.source_status === "resolved" &&
+    (!item.freshness_status || item.freshness_status === "current") &&
+    (item.verified_content_hash ?? item.confirmed_content_hash) === item.content_hash
+  ).length;
+  const notCopiedCount = includeSources
+    ? task.items.length - eligibleSourceCount
+    : task.items.length;
+
+  const openEvidence = async (item: WorkspaceTaskItem) => {
+    try {
+      const target = await api.openTarget(task.workspace_id, item.document_id);
+      await openLocalUri(target.uri);
+      setOpenedEvidence((current) => new Set(current).add(`${item.item_id}:${item.content_hash}`));
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : "证据原文无法打开，暂时不能确认。");
+    }
+  };
+  const confirmEvidence = (item: WorkspaceTaskItem) => updateItem(item.item_id, {
+    review_state: "confirmed",
+    verified_content_hash: item.content_hash,
+    confirmed_content_hash: item.content_hash,
+    verified_at: new Date().toISOString(),
+  });
+  const markAllPending = () => updateTask((value) => ({
+    ...value,
+    items: value.items.map((item) => ({
+      ...item,
+      review_state: "pending" as const,
+      verified_content_hash: undefined,
+      confirmed_content_hash: undefined,
+      verified_at: undefined,
+    })),
+  }));
 
   return (
     <div className="taskEditor">
@@ -403,17 +505,43 @@ export function TaskPacksView() {
         <span>{task.items.filter((item) => item.review_state === "pending" || item.source_status === "source_unconfirmed" || (item.freshness_status && item.freshness_status !== "current")).length} 条待核验</span>
         <span className={freshnessIssues > 0 ? "unresolvedText" : ""}>{freshnessIssues} 条来源待复核</span>
         {freshnessIssues > 0 && <button className="textButton smallButton" disabled={revalidating || saveState === "conflict"} onClick={() => void revalidateSources()}>{revalidating ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}重新核验来源</button>}
+        {task.items.length > 0 && <button className="textButton smallButton" disabled={saveState === "conflict"} onClick={markAllPending}>全部标为待核验</button>}
         <button className="textButton dangerText" disabled={archiving || exporting || saveState === "conflict"} onClick={() => void archive()}>{archiving ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}归档</button>
       </div>
       <section className="packExportBar" aria-label="研究资料包导出">
         <div><FileArchive size={19} /><span><strong>研究资料包</strong><small>包含 research.md、references.bib、task.json 和 manifest.json</small></span></div>
         <label>引用样式<select value={task.citation_style ?? "gb-t-7714-2015"} onChange={(event) => updateTask((value) => ({ ...value, citation_style: event.target.value as CitationStyle }))}><option value="gb-t-7714-2015">GB/T 7714-2015</option><option value="apa">APA</option></select></label>
-        <label className="includeSources"><input type="checkbox" checked={includeSources} onChange={(event) => setIncludeSources(event.target.checked)} />包含已确认原件</label>
+        <label className="includeSources" title="只复制已人工核验、哈希未变化且当前可访问的来源"><input type="checkbox" checked={includeSources} onChange={(event) => setIncludeSources(event.target.checked)} />包含符合条件的原件</label>
         <button className="primaryButton" disabled={exporting || archiving || saveState === "conflict"} onClick={() => void exportResearchPack()}>{exporting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}导出研究包</button>
+        <div className="exportChecks">
+          <span>{unverifiedCount} 未核验</span>
+          <span>{changedCount} 已变化</span>
+          <span>{unavailableCount} 不可访问</span>
+          <span>{notCopiedCount} 不复制原件</span>
+        </div>
       </section>
+      {savedExport && (
+        <div className="successBox exportSuccess" role="status">
+          <Check size={17} />
+          <span><strong>研究包已保存</strong><small>{savedExportName} · 工件保留至 {relativeTime(savedExport.expires_at)}</small></span>
+          <button className="secondaryButton smallButton" onClick={() => void revealSavedFile(savedExport.artifact_id)}>打开所在位置</button>
+        </div>
+      )}
       <div className="slotList">
         {sortedSlots.map((slot) => (
-          <TaskSlot key={slot.slot_id} slot={slot} taskItems={task.items} slots={sortedSlots} updateItem={updateItem} removeItem={removeItem} updateSlot={updateSlot} removeSlot={removeSlot} />
+          <TaskSlot
+            key={slot.slot_id}
+            slot={slot}
+            taskItems={task.items}
+            slots={sortedSlots}
+            openedEvidence={openedEvidence}
+            updateItem={updateItem}
+            removeItem={removeItem}
+            updateSlot={updateSlot}
+            removeSlot={removeSlot}
+            openEvidence={openEvidence}
+            confirmEvidence={confirmEvidence}
+          />
         ))}
         <button className="textButton addSlotButton" onClick={addSlot}><Plus size={16} />添加分组</button>
       </div>
@@ -425,18 +553,24 @@ function TaskSlot({
   slot,
   taskItems,
   slots,
+  openedEvidence,
   updateItem,
   removeItem,
   updateSlot,
   removeSlot,
+  openEvidence,
+  confirmEvidence,
 }: {
   slot: WorkspaceTaskSlot;
   taskItems: WorkspaceTaskItem[];
   slots: WorkspaceTaskSlot[];
+  openedEvidence: Set<string>;
   updateItem: (itemId: string, changes: Partial<WorkspaceTaskItem>) => void;
   removeItem: (itemId: string) => void;
   updateSlot: (slotId: string, changes: Partial<WorkspaceTaskSlot>) => void;
   removeSlot: (slotId: string) => void;
+  openEvidence: (item: WorkspaceTaskItem) => Promise<void>;
+  confirmEvidence: (item: WorkspaceTaskItem) => void;
 }) {
   const items = taskItems.filter((item) => item.slot_id === slot.slot_id).sort((left, right) => left.position - right.position);
   return (
@@ -454,6 +588,7 @@ function TaskSlot({
           {items.map((item) => {
             const sourceUnconfirmed = item.source_status === "source_unconfirmed";
             const freshnessIssue = hasFreshnessIssue(item.freshness_status);
+            const opened = openedEvidence.has(`${item.item_id}:${item.content_hash}`);
             return (
               <article className={`taskItem ${freshnessIssue ? "taskItemStale" : ""}`} key={item.item_id}>
                 <span className={sourceUnconfirmed || freshnessIssue || item.review_state === "pending" ? "pendingDot" : "confirmedDot"} />
@@ -466,11 +601,16 @@ function TaskSlot({
                 <select value={item.slot_id} onChange={(event) => updateItem(item.item_id, { slot_id: event.target.value })} aria-label={`${item.name} 所属分组`}>
                   {slots.map((candidate) => <option key={candidate.slot_id} value={candidate.slot_id}>{candidate.name}</option>)}
                 </select>
-                {sourceUnconfirmed || freshnessIssue ? (
-                  <span className="reviewToggle unresolvedText" role="status">{freshnessLabel(item)}</span>
-                ) : (
-                  <label className="reviewToggle"><input type="checkbox" checked={item.review_state === "confirmed"} onChange={(event) => updateItem(item.item_id, { review_state: event.target.checked ? "confirmed" : "pending" })} />{item.review_state === "confirmed" ? <Check size={15} /> : null}<span>{item.review_state === "confirmed" ? "已确认" : "待核验"}</span></label>
-                )}
+                <div className="evidenceReviewActions">
+                  <button className="secondaryButton smallButton" disabled={sourceUnconfirmed} onClick={() => void openEvidence(item)}><ExternalLink size={14} />打开证据</button>
+                  {sourceUnconfirmed || freshnessIssue ? (
+                    <span className="unresolvedText" role="status">{freshnessLabel(item)}</span>
+                  ) : item.review_state === "confirmed" ? (
+                    <button className="textButton smallButton" onClick={() => updateItem(item.item_id, { review_state: "pending", verified_content_hash: undefined, confirmed_content_hash: undefined, verified_at: undefined })}><Check size={14} />已人工核验</button>
+                  ) : (
+                    <button className="secondaryButton smallButton" disabled={!opened} onClick={() => confirmEvidence(item)}>确认已对照原文</button>
+                  )}
+                </div>
                 <button className="iconButton" onClick={() => removeItem(item.item_id)} aria-label={`移除 ${item.name}`} title="移除"><Trash2 size={16} /></button>
               </article>
             );
