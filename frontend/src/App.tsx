@@ -26,6 +26,7 @@ import { Onboarding } from "./components/Onboarding";
 import { RepositoriesView } from "./components/RepositoriesView";
 import { SearchWorkspace } from "./components/SearchWorkspace";
 import { TaskPacksView } from "./components/TaskPacksView";
+import { TaskCenter } from "./components/TaskCenter";
 import { TaskTray } from "./components/TaskTray";
 import { useTaskActions } from "./taskPackActions";
 
@@ -179,6 +180,7 @@ export default function App() {
             {workspaces.data.map((item) => <option key={item.workspace_id} value={item.workspace_id}>{workspaceLabels.get(item.workspace_id) ?? item.name}</option>)}
           </select>
         </label>
+        <TaskCenter workspaceId={workspaceId} />
         <div className="syncStatus"><span className={currentWorkspace.available ? "onlineDot" : "offlineDot"} />{workspaceSyncStatusText(currentWorkspace)}</div>
       </header>
       <nav className="sideNav" aria-label="主导航">

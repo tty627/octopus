@@ -106,7 +106,7 @@ def test_research_markdown_and_safe_names_cover_locators_and_statuses() -> None:
     assert markdown.startswith("# Research: <2026>/\"Preview\"")
     assert "bundle.zip!/papers/paper-one.pdf" in markdown
     assert "第 3 页" in markdown
-    assert "Changed Notes** · 待重新核验 · 第 7 页" in markdown
+    assert "Changed Notes** · 来源已变化，需重新核验 · 第 7 页" in markdown
     assert "## 研究缺口\n\n尚无资料\n\n暂无资料。" in markdown
     assert "引用：Ada Lovelace. Paper One[J]." in markdown
     assert research_export._safe_name('  <>:"/\\|?*  ') == "-"

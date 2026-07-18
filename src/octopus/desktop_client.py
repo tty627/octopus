@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from packaging.version import InvalidVersion, Version
@@ -167,6 +170,52 @@ class LocalApiClient:
             ) from error
         except (OSError, TimeoutError, urllib.error.URLError) as error:
             raise DesktopServiceError("service_unavailable", str(error)) from error
+
+    def download_export_artifact(
+        self,
+        workspace_id: str,
+        artifact_id: str,
+        destination: Path,
+        *,
+        timeout: float = 300.0,
+    ) -> int:
+        """Stream a signed local export artifact into an already chosen temp path."""
+        workspace = urllib.parse.quote(workspace_id, safe="")
+        artifact = urllib.parse.quote(artifact_id, safe="")
+        request = urllib.request.Request(
+            f"{self.base_url}/v2/workspaces/{workspace}/exports/{artifact}",
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/zip",
+            },
+            method="GET",
+        )
+        written = 0
+        try:
+            with (
+                urllib.request.urlopen(request, timeout=timeout) as response,  # noqa: S310
+                destination.open("xb") as target,
+            ):
+                while chunk := response.read(1024 * 1024):
+                    target.write(chunk)
+                    written += len(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+        except urllib.error.HTTPError as error:
+            detail = error.reason
+            try:
+                response = json.loads(error.read().decode("utf-8"))
+                detail = response.get("detail", detail) if isinstance(response, dict) else detail
+            except (UnicodeError, json.JSONDecodeError):
+                pass
+            raise DesktopServiceError(
+                "artifact_download_failed",
+                str(detail),
+                status_code=error.code,
+            ) from error
+        except (OSError, TimeoutError, urllib.error.URLError) as error:
+            raise DesktopServiceError("artifact_download_failed", str(error)) from error
+        return written
 
     def contract(self) -> dict[str, Any]:
         return cast(dict[str, Any], self._request("GET", "/v1/contract"))

@@ -19,13 +19,17 @@ from .credentials import (
     resolve_ai_api_key,
     save_stored_ai_api_key,
 )
-from .models import RepositoryConfig, RepositoryIdentity, ServiceJob
+from .export_artifacts import register_export_artifact, resolve_export_artifact
+from .models import RepositoryConfig, RepositoryIdentity, ServiceJob, utc_now
 from .providers import (
+    PROVIDER_PRESETS,
     ProviderAuthError,
+    ProviderCapabilities,
     ProviderOutputError,
     ProviderQuotaError,
     ProviderRateLimitError,
     ProviderTransientError,
+    provider_presets,
     test_ai_connection,
 )
 from .research_ai import (
@@ -34,9 +38,11 @@ from .research_ai import (
     confirm_research_proposal,
     create_research_proposal,
     run_ai_index,
+    run_workspace_research,
 )
 from .research_export import export_research_bundle
 from .service_runtime import JobManager
+from .vision import analyze_selected_page, vision_preflight
 from .workspace_tasks_v2 import (
     TaskTemplateId,
     WorkspaceTask,
@@ -79,7 +85,7 @@ class WorkspaceSearchRequest(StrictRequestModel):
     path_prefix: str = Field(default="", max_length=2_000)
     extensions: list[str] = Field(default_factory=list, max_length=100)
     readability: list[Literal["readable", "partial", "low"]] = Field(default_factory=list)
-    indexing_states: list[Literal["indexed", "metadata_only", "failed"]] = Field(
+    indexing_states: list[Literal["indexed", "metadata_only", "failed", "pending"]] = Field(
         default_factory=list
     )
     source_kinds: list[str] = Field(default_factory=list, max_length=10)
@@ -95,10 +101,12 @@ class WorkspaceVisionRequest(StrictRequestModel):
 class WorkspaceAISettingsRequest(StrictRequestModel):
     enabled: bool = False
     provider: Literal["deepseek", "openai_compatible"] = "deepseek"
+    preset: Literal["deepseek", "glm", "custom"] | None = None
     base_url: str = Field(min_length=8, max_length=2_048)
     model: str = Field(min_length=1, max_length=200)
     api_key: str | None = Field(default=None, max_length=8_192, repr=False)
     clear_api_key: bool = False
+    tested_capabilities: ProviderCapabilities | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -141,6 +149,19 @@ class WorkspaceTaskCreateRequest(StrictRequestModel):
     template_id: TaskTemplateId = "free_research"
 
 
+class WorkspaceVisionPageRequest(StrictRequestModel):
+    page_number: int = Field(default=1, ge=1, le=2_000)
+
+
+class WorkspaceVisionAnalyzeRequest(WorkspaceVisionPageRequest):
+    prompt: str = Field(
+        default="请描述当前页面的关键信息，并指出需要人工核验的细节。",
+        min_length=1,
+        max_length=2_000,
+    )
+    confirm_image_send: bool = False
+
+
 class WorkspaceTaskUpdateRequest(StrictRequestModel):
     expected_revision: int = Field(ge=1)
     task: WorkspaceTask
@@ -165,7 +186,11 @@ class WorkspaceTaskExportRequest(StrictRequestModel):
 
 
 class AIIndexRequest(StrictRequestModel):
-    limit: int = Field(default=20, ge=1, le=100)
+    scope: Literal["all", "documents", "folders"] = "all"
+    max_calls: int | None = Field(default=None, ge=1, le=10_000)
+    retry_failed: bool = False
+    # Compatibility with the first V2 client. max_calls takes precedence.
+    limit: int | None = Field(default=None, ge=1, le=10_000)
 
 
 class ResearchProposalRequest(StrictRequestModel):
@@ -176,6 +201,21 @@ class ResearchProposalRequest(StrictRequestModel):
 
 class ResearchProposalConfirmRequest(StrictRequestModel):
     proposal: ResearchTaskProposal
+
+
+class WorkspaceResearchRequest(StrictRequestModel):
+    question: str = Field(min_length=1, max_length=2_000)
+    limit: int = Field(default=50, ge=1, le=100)
+    path_prefix: str = Field(default="", max_length=2_000)
+    extensions: list[str] = Field(default_factory=list, max_length=100)
+    readability: list[Literal["readable", "partial", "low"]] = Field(default_factory=list)
+    indexing_states: list[Literal["indexed", "metadata_only", "failed", "pending"]] = Field(
+        default_factory=list
+    )
+    source_kinds: list[str] = Field(default_factory=list, max_length=10)
+    modified_from: str = ""
+    modified_to: str = ""
+    task_id: str = ""
 
 
 def _workspace_store(workspace_id: str) -> WorkspaceStore:
@@ -197,13 +237,36 @@ def _workspace_ai_payload(workspace_id: str) -> dict[str, Any]:
         "workspace_id": workspace_id,
         "enabled": workspace.ai_policy.enabled,
         "provider": workspace.ai_policy.provider,
+        "preset": workspace.ai_policy.provider_preset or (
+            "deepseek" if workspace.ai_policy.provider == "deepseek" else "custom"
+        ),
         "base_url": workspace.ai_policy.base_url,
         "model": workspace.ai_policy.model,
         "credential_configured": bool(credential and credential.api_key),
         "credential_source": credential.source if credential else "none",
         "credential_error": credential_error,
         "vision_enabled": workspace.vision_enabled,
+        "capabilities": workspace.ai_policy.tested_capabilities or {
+            "text": True,
+            "structured_output": workspace.ai_policy.provider in {
+                "deepseek",
+                "openai_compatible",
+            },
+            "vision": False,
+            "file_upload": False,
+        },
+        "capabilities_tested_at": workspace.ai_policy.capabilities_tested_at,
     }
+
+
+def _normalized_ai_settings(
+    request: WorkspaceAISettingsRequest,
+) -> tuple[str, str, str]:
+    preset = request.preset or ("deepseek" if request.provider == "deepseek" else "custom")
+    definition = PROVIDER_PRESETS[preset]
+    provider = str(definition["provider"])
+    base_url = str(definition["base_url"] or request.base_url)
+    return provider, base_url, preset
 
 
 def _ai_candidate(workspace_id: str, request: WorkspaceAISettingsRequest) -> RepositoryConfig:
@@ -217,8 +280,10 @@ def _ai_candidate(workspace_id: str, request: WorkspaceAISettingsRequest) -> Rep
         )
     )
     config.ai_policy = workspace.ai_policy.model_copy(deep=True)
-    config.ai_policy.provider = request.provider
-    config.ai_policy.base_url = request.base_url
+    provider, base_url, preset = _normalized_ai_settings(request)
+    config.ai_policy.provider = provider
+    config.ai_policy.provider_preset = preset
+    config.ai_policy.base_url = base_url
     config.ai_policy.model = request.model
     config.ai_policy.complex_model = request.model
     config.ai_policy.enabled = request.enabled
@@ -284,10 +349,15 @@ def register_workspace_routes(
                 "evidence_tasks",
                 "research_task_templates",
                 "research_bundle_export",
+                "research_bundle_export_jobs",
+                "signed_export_artifacts",
                 "ai_document_and_folder_cards",
                 "ai_research_task_proposals",
+                "workspace_research_jobs",
+                "task_proposal_jobs",
                 "v1_task_migration",
                 "explicit_vision_authorization",
+                "selected_page_vision_analysis",
                 "persistent_cancelable_jobs",
             ],
         }
@@ -370,6 +440,48 @@ def register_workspace_routes(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
         return report.model_dump(mode="json")
 
+    @app.post(
+        "/v2/workspaces/{workspace_id}/research",
+        response_model=ServiceJob,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=authenticated,
+    )
+    def workspace_research(
+        workspace_id: str,
+        request: WorkspaceResearchRequest,
+    ) -> ServiceJob:
+        _workspace_store(workspace_id)
+        search_options = {
+            "path_prefix": request.path_prefix,
+            "extensions": request.extensions,
+            "readability": request.readability,
+            "indexing_states": request.indexing_states,
+            "source_kinds": request.source_kinds,
+            "modified_from": request.modified_from,
+            "modified_to": request.modified_to,
+            "task_id": request.task_id,
+        }
+        retry_payload = {
+            "kind": "workspace_research",
+            "question": request.question,
+            "limit": request.limit,
+            "filters": search_options,
+        }
+
+        def execute(progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+            def relay(value: dict[str, Any]) -> None:
+                progress({**value, "retry_payload": retry_payload})
+
+            return run_workspace_research(
+                workspace_id,
+                request.question,
+                relay,
+                limit=request.limit,
+                search_options=search_options,
+            )
+
+        return jobs.submit_with_progress(workspace_id, "workspace_research", execute)
+
     @app.get("/v2/workspaces/{workspace_id}/ai-index", dependencies=authenticated)
     def workspace_ai_index_status(workspace_id: str) -> dict[str, Any]:
         _workspace_store(workspace_id)
@@ -389,7 +501,14 @@ def register_workspace_routes(
         job = jobs.submit_unique_with_progress(
             workspace_id,
             "workspace_ai_index",
-            lambda progress: run_ai_index(workspace_id, request.limit, progress),
+            lambda progress: run_ai_index(
+                workspace_id,
+                request.limit,
+                progress,
+                scope=request.scope,
+                max_calls=request.max_calls,
+                retry_failed=request.retry_failed,
+            ),
         )
         if job is None:
             raise HTTPException(status.HTTP_409_CONFLICT, "AI 索引任务已经在运行。")
@@ -488,18 +607,82 @@ def register_workspace_routes(
         document_id: str,
         page: int,
         highlight: str = "",
+        variant: Literal["base", "highlighted"] = "highlighted",
     ) -> FileResponse:
         try:
             preview = _workspace_store(workspace_id).preview_path(
                 document_id,
                 page,
                 highlight,
+                variant,
             )
         except FileNotFoundError as error:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
         except ValueError as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
-        return FileResponse(preview, media_type="image/png")
+        except (OSError, RuntimeError) as error:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"preview_render_failed:{type(error).__name__}",
+            ) from error
+        actual_variant = "base" if "-base" in preview.stem else "highlighted"
+        return FileResponse(
+            preview,
+            media_type="image/png",
+            headers={"X-Octopus-Preview-Variant": actual_variant},
+        )
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/documents/{document_id}/vision/preflight",
+        dependencies=authenticated,
+    )
+    def workspace_vision_preflight(
+        workspace_id: str,
+        document_id: str,
+        request: WorkspaceVisionPageRequest,
+    ) -> dict[str, Any]:
+        try:
+            return vision_preflight(
+                _workspace_store(workspace_id),
+                document_id,
+                request.page_number,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        except (OSError, RuntimeError) as error:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"vision_prepare_failed:{type(error).__name__}",
+            ) from error
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/documents/{document_id}/vision/analyze",
+        dependencies=authenticated,
+    )
+    def workspace_vision_analyze(
+        workspace_id: str,
+        document_id: str,
+        request: WorkspaceVisionAnalyzeRequest,
+    ) -> dict[str, Any]:
+        try:
+            return analyze_selected_page(
+                _workspace_store(workspace_id),
+                document_id,
+                request.page_number,
+                request.prompt,
+                confirm_image_send=request.confirm_image_send,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"vision_analysis_failed:{type(error).__name__}",
+            ) from error
 
     @app.get("/v2/workspaces/{workspace_id}/vision-authorization", dependencies=authenticated)
     def vision_authorization(workspace_id: str) -> dict[str, Any]:
@@ -518,6 +701,10 @@ def register_workspace_routes(
             save_global_config(config)
         return {"workspace_id": workspace_id, "vision_enabled": request.vision_enabled}
 
+    @app.get("/v2/ai-provider-presets", dependencies=authenticated)
+    def workspace_ai_provider_presets() -> list[dict[str, Any]]:
+        return provider_presets()
+
     @app.get("/v2/workspaces/{workspace_id}/ai-settings", dependencies=authenticated)
     def workspace_ai_settings(workspace_id: str) -> dict[str, Any]:
         return _workspace_ai_payload(workspace_id)
@@ -534,7 +721,8 @@ def register_workspace_routes(
             )
         _workspace_store(workspace_id)
         previous_key = ""
-        previous_provider: str = request.provider
+        provider, base_url, preset = _normalized_ai_settings(request)
+        previous_provider: str = provider
         try:
             with global_config_lock():
                 config = load_global_config()
@@ -544,15 +732,27 @@ def register_workspace_routes(
                 if request.clear_api_key:
                     delete_stored_ai_api_key(workspace_id)
                 elif request.api_key:
-                    save_stored_ai_api_key(workspace_id, request.provider, request.api_key)
-                credential = resolve_ai_api_key(workspace_id, request.provider)
+                    save_stored_ai_api_key(workspace_id, provider, request.api_key)
+                credential = resolve_ai_api_key(workspace_id, provider)
                 if request.enabled and not credential.api_key:
                     raise ValueError("An API key is required before AI can be enabled")
-                current.ai_policy.provider = request.provider
-                current.ai_policy.base_url = request.base_url
+                settings_changed = (
+                    current.ai_policy.provider != provider
+                    or current.ai_policy.base_url != base_url
+                    or current.ai_policy.model != request.model
+                )
+                current.ai_policy.provider = provider
+                current.ai_policy.provider_preset = preset
+                current.ai_policy.base_url = base_url
                 current.ai_policy.model = request.model
                 current.ai_policy.complex_model = request.model
                 current.ai_policy.enabled = request.enabled
+                if request.tested_capabilities is not None:
+                    current.ai_policy.tested_capabilities = request.tested_capabilities.model_dump()
+                    current.ai_policy.capabilities_tested_at = utc_now()
+                elif settings_changed:
+                    current.ai_policy.tested_capabilities = {}
+                    current.ai_policy.capabilities_tested_at = ""
                 save_global_config(config)
         except (CredentialStoreError, OSError, ValueError) as error:
             try:
@@ -578,13 +778,14 @@ def register_workspace_routes(
         request: WorkspaceAISettingsRequest,
     ) -> dict[str, Any]:
         candidate = _ai_candidate(workspace_id, request)
+        provider, _, _ = _normalized_ai_settings(request)
         try:
             credential = (
-                request.api_key or resolve_ai_api_key(workspace_id, request.provider).api_key
+                request.api_key or resolve_ai_api_key(workspace_id, provider).api_key
             )
             if not credential:
                 return {"ok": False, "code": "key_not_configured", "message": "请先填写 API Key。"}
-            test_ai_connection(candidate, credential)
+            capabilities = test_ai_connection(candidate, credential)
         except CredentialStoreError:
             return {
                 "ok": False,
@@ -594,7 +795,14 @@ def register_workspace_routes(
         except Exception as error:
             code, message = _ai_error(error)
             return {"ok": False, "code": code, "message": message}
-        return {"ok": True, "code": "connected", "message": f"已连接 {request.model}。"}
+        if not isinstance(capabilities, ProviderCapabilities):
+            capabilities = ProviderCapabilities(text=True)
+        return {
+            "ok": True,
+            "code": "connected",
+            "message": f"已连接 {request.model}。",
+            "capabilities": capabilities.model_dump(mode="json"),
+        }
 
     @app.get("/v2/workspaces/{workspace_id}/tasks", dependencies=authenticated)
     def workspace_task_list(
@@ -647,6 +855,60 @@ def register_workspace_routes(
         except RuntimeError as error:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
         return proposal.model_dump(mode="json")
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/task-proposals/jobs",
+        response_model=ServiceJob,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=authenticated,
+    )
+    def workspace_task_proposal_async(
+        workspace_id: str,
+        request: ResearchProposalRequest,
+    ) -> ServiceJob:
+        _workspace_store(workspace_id)
+
+        def execute(progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+            retry_payload = {
+                "kind": "task_proposal",
+                "goal": request.goal,
+                "title": request.title,
+                "template_id": request.template_id,
+            }
+            progress(
+                {
+                    "phase": "understanding",
+                    "completed": 0,
+                    "total": 3,
+                    "retry_payload": retry_payload,
+                }
+            )
+            progress(
+                {
+                    "phase": "retrieving",
+                    "completed": 1,
+                    "total": 3,
+                    "retry_payload": retry_payload,
+                }
+            )
+            proposal = create_research_proposal(
+                workspace_id,
+                request.goal,
+                request.title,
+                request.template_id,
+            )
+            progress(
+                {
+                    "phase": "completed",
+                    "completed": 3,
+                    "total": 3,
+                    "evidence_count": len(proposal.candidates),
+                    "retry_payload": retry_payload,
+                }
+            )
+            return {"proposal": proposal.model_dump(mode="json")}
+
+        return jobs.submit_with_progress(workspace_id, "task_proposal", execute)
 
     @app.post(
         "/v2/workspaces/{workspace_id}/task-proposals/confirm",
@@ -764,6 +1026,79 @@ def register_workspace_routes(
         except (OSError, ValueError, FileNotFoundError) as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
         return FileResponse(output, media_type="application/zip", filename=output.name)
+
+    @app.post(
+        "/v2/workspaces/{workspace_id}/tasks/{task_id}/exports",
+        response_model=ServiceJob,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=authenticated,
+    )
+    def workspace_task_export_async(
+        workspace_id: str,
+        task_id: str,
+        request: WorkspaceTaskExportRequest,
+    ) -> ServiceJob:
+        _workspace_store(workspace_id)
+        try:
+            task = load_task(workspace_id, task_id)
+        except WorkspaceTaskError as error:
+            raise _handle_task_error(error) from error
+
+        def execute(progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+            retry_payload = {
+                "kind": "task_export",
+                "task_id": task_id,
+                "citation_style": request.citation_style,
+                "include_sources": request.include_sources,
+            }
+
+            def relay(value: dict[str, Any]) -> None:
+                progress({**value, "retry_payload": retry_payload})
+
+            output = export_research_bundle(
+                task,
+                citation_style=normalize_citation_style(request.citation_style),
+                include_sources=request.include_sources,
+                progress_callback=relay,
+            )
+            artifact = register_export_artifact(workspace_id, output)
+            result = artifact.model_dump(mode="json")
+            result["progress"] = {
+                "phase": "completed",
+                "completed": len(task.items),
+                "total": len(task.items),
+                "retry_payload": retry_payload,
+            }
+            return result
+
+        return jobs.submit_with_progress(workspace_id, "task_export", execute)
+
+    @app.get(
+        "/v2/workspaces/{workspace_id}/exports/{artifact_id}",
+        response_class=FileResponse,
+        dependencies=authenticated,
+    )
+    def workspace_export_artifact(
+        workspace_id: str,
+        artifact_id: str,
+    ) -> FileResponse:
+        _workspace_store(workspace_id)
+        try:
+            artifact, path = resolve_export_artifact(workspace_id, artifact_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+        return FileResponse(
+            path,
+            media_type="application/zip",
+            filename=artifact.file_name,
+            headers={
+                "X-Octopus-Artifact-Id": artifact.artifact_id,
+                "X-Octopus-Artifact-Sha256": artifact.sha256,
+                "X-Octopus-Artifact-Expires-At": artifact.expires_at,
+            },
+        )
 
     @app.get("/v2/workspaces/{workspace_id}/changes", dependencies=authenticated)
     def workspace_changes(

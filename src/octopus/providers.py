@@ -60,6 +60,57 @@ class ProviderBudgetError(ProviderQuotaError):
 OutputModel = TypeVar("OutputModel", bound=BaseModel)
 
 
+class ProviderCapabilities(BaseModel):
+    text: bool = False
+    structured_output: bool = False
+    vision: bool = False
+    file_upload: bool = False
+
+
+PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
+    "deepseek": {
+        "preset": "deepseek",
+        "label": "DeepSeek",
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "capability_hints": {
+            "text": True,
+            "structured_output": True,
+            "vision": False,
+            "file_upload": False,
+        },
+    },
+    "glm": {
+        "preset": "glm",
+        "label": "智谱 GLM",
+        "provider": "openai_compatible",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "capability_hints": {
+            "text": True,
+            "structured_output": "连接测试确认",
+            "vision": "取决于所选模型",
+            "file_upload": False,
+        },
+    },
+    "custom": {
+        "preset": "custom",
+        "label": "OpenAI Compatible",
+        "provider": "openai_compatible",
+        "base_url": "",
+        "capability_hints": {
+            "text": "连接测试确认",
+            "structured_output": "连接测试确认",
+            "vision": "连接测试确认",
+            "file_upload": False,
+        },
+    },
+}
+
+
+def provider_presets() -> list[dict[str, Any]]:
+    return [dict(value) for value in PROVIDER_PRESETS.values()]
+
+
 def classify_provider_error(error: Exception) -> ProviderError:
     status_code = getattr(error, "status_code", None)
     if status_code == 401:
@@ -173,7 +224,7 @@ class OpenAICompatibleProvider(HeuristicProvider):
         self.sleeper = sleeper
         self.fatal_error: ProviderError | None = None
 
-    def test_connection(self) -> None:
+    def test_connection(self) -> ProviderCapabilities:
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -185,6 +236,54 @@ class OpenAICompatibleProvider(HeuristicProvider):
             raise classify_provider_error(error) from error
         if not getattr(response, "choices", None):
             raise ProviderOutputError("AI provider returned no completion choices")
+        structured = False
+        try:
+            structured_response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": 'Return JSON: {"ok": true}'}],
+                response_format={"type": "json_object"},
+                max_tokens=32,
+                stream=False,
+            )
+            content = structured_response.choices[0].message.content or "{}"
+            structured = isinstance(json.loads(content), dict)
+        except Exception:
+            structured = False
+        vision = False
+        try:
+            vision_messages: Any = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Reply with the dominant color in one word."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    "data:image/png;base64,"
+                                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                                    "AAAAC0lEQVR42mP8/x8AAusB9Y9Z4C8AAAAASUVORK5CYII="
+                                )
+                            },
+                        },
+                    ],
+                }
+            ]
+            vision_response = self.client.chat.completions.create(
+                model=self.model,
+                messages=vision_messages,
+                max_tokens=16,
+                stream=False,
+            )
+            vision = bool(getattr(vision_response, "choices", None))
+        except Exception:
+            vision = False
+        return ProviderCapabilities(
+            text=True,
+            structured_output=structured,
+            vision=vision,
+            file_upload=False,
+        )
 
     def _stop_for_budget(self, message: str) -> NoReturn:
         error = ProviderBudgetError(message)
@@ -275,6 +374,78 @@ class OpenAICompatibleProvider(HeuristicProvider):
             except Exception as error:
                 self.usage.duration_ms += int((time.perf_counter() - started) * 1000)
                 mapped = classify_provider_error(error)
+                code = type(mapped).__name__
+                self.usage.errors[code] = self.usage.errors.get(code, 0) + 1
+                if isinstance(mapped, (ProviderAuthError, ProviderQuotaError)):
+                    self.fatal_error = mapped
+                    raise mapped from error
+                if (
+                    isinstance(mapped, (ProviderRateLimitError, ProviderTransientError))
+                    and attempt < self.policy.max_transport_retries
+                ):
+                    self.sleeper(min(2**attempt, 8))
+                    attempt += 1
+                    continue
+                raise mapped from error
+
+    def analyze_image(self, prompt: str, image_data_url: str) -> str:
+        """Analyze one explicitly selected image without exposing a file upload API."""
+        if self.fatal_error is not None:
+            raise self.fatal_error
+        attempt = 0
+        system = (
+            "You analyze one user-selected research evidence page. Describe only visible "
+            "content, distinguish observation from inference, and answer in Chinese."
+        )
+        while True:
+            output_limit = self._preflight_budget(system, prompt)
+            self.remaining_calls -= 1
+            self.usage.calls += 1
+            self.usage.models[self.model] = self.usage.models.get(self.model, 0) + 1
+            prompt_version = self.policy.prompt_version
+            self.usage.prompt_versions[prompt_version] = (
+                self.usage.prompt_versions.get(prompt_version, 0) + 1
+            )
+            self.usage.purposes["selected_page_vision"] = (
+                self.usage.purposes.get("selected_page_vision", 0) + 1
+            )
+            messages: Any = [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ],
+                },
+            ]
+            started = time.perf_counter()
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=output_limit,
+                    stream=False,
+                )
+                self.usage.duration_ms += int((time.perf_counter() - started) * 1000)
+                response_usage = response.usage
+                input_tokens = int(response_usage.prompt_tokens if response_usage else 0)
+                output_tokens = int(response_usage.completion_tokens if response_usage else 0)
+                self.usage.input_tokens += input_tokens
+                self.usage.output_tokens += output_tokens
+                self.usage.total_tokens += input_tokens + output_tokens
+                self._record_cost(input_tokens, output_tokens)
+                content = response.choices[0].message.content
+                if not content:
+                    raise ProviderOutputError("AI provider returned an empty vision response")
+                return str(content)
+            except Exception as error:
+                self.usage.duration_ms += int((time.perf_counter() - started) * 1000)
+                mapped = (
+                    error
+                    if isinstance(error, ProviderError)
+                    else classify_provider_error(error)
+                )
                 code = type(mapped).__name__
                 self.usage.errors[code] = self.usage.errors.get(code, 0) + 1
                 if isinstance(mapped, (ProviderAuthError, ProviderQuotaError)):
@@ -424,8 +595,8 @@ def create_network_provider(
     raise ValueError(f"Unsupported AI provider: {provider}")
 
 
-def test_ai_connection(config: RepositoryConfig, api_key: str) -> None:
-    create_network_provider(config, api_key, timeout=20.0).test_connection()
+def test_ai_connection(config: RepositoryConfig, api_key: str) -> ProviderCapabilities:
+    return create_network_provider(config, api_key, timeout=20.0).test_connection()
 
 
 def create_provider(config: RepositoryConfig, require_network: bool = False) -> AIProvider:

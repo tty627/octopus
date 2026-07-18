@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Archive,
@@ -17,8 +17,16 @@ import {
 } from "lucide-react";
 import { ApiError, api } from "../api";
 import { recentActivity } from "../activity";
+import { waitForJob } from "../jobs";
 import { EMPTY_FILTERS, useAppStore } from "../store";
-import type { SearchReportV2, SearchResultV2, SourceKind, WorkspaceEvidence } from "../types";
+import type {
+  SearchReportV2,
+  SearchResultV2,
+  ServiceJob,
+  SourceKind,
+  WorkspaceEvidence,
+  WorkspaceResearchResult,
+} from "../types";
 import { documentQualityLabel, formatBytes, searchEvidenceText } from "../utils";
 import { locatorLabel, sourceKindLabel } from "./researchLabels";
 
@@ -60,12 +68,14 @@ export function SearchWorkspace({
   const setSubmittedQuery = useAppStore((state) => state.setSubmittedQuery);
   const filters = useAppStore((state) => state.filters);
   const setFilters = useAppStore((state) => state.setFilters);
-  const assistedEnabled = useAppStore((state) => state.assistedEnabled);
-  const setAssistedEnabled = useAppStore((state) => state.setAssistedEnabled);
   const inspector = useAppStore((state) => state.inspector);
   const inspect = useAppStore((state) => state.inspect);
   const activeTask = useAppStore((state) => state.activeTask);
   const [report, setReport] = useState<SearchReportV2 | null>(null);
+  const [searchMode, setSearchMode] = useState<"lookup" | "research">("lookup");
+  const [researchResult, setResearchResult] = useState<WorkspaceResearchResult | null>(null);
+  const [researchPhase, setResearchPhase] = useState("");
+  const [activeResearchJob, setActiveResearchJob] = useState<ServiceJob | null>(null);
   const [reportWorkspaceId, setReportWorkspaceId] = useState("");
   const [stage, setStage] = useState<"idle" | "searching" | "ready" | "degraded">("idle");
   const [filterOpen, setFilterOpen] = useState(false);
@@ -73,14 +83,7 @@ export function SearchWorkspace({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const sequence = useRef(0);
   const controller = useRef<AbortController | null>(null);
-  const aiSettings = useQuery({
-    queryKey: ["ai-settings", workspaceId],
-    queryFn: () => api.aiSettings(workspaceId),
-    enabled: Boolean(workspaceId),
-  });
-  const assistedAvailable = Boolean(
-    aiSettings.data?.enabled && aiSettings.data.credential_configured,
-  );
+  const queryClient = useQueryClient();
 
   useEffect(() => () => controller.current?.abort(), []);
   useEffect(() => {
@@ -88,6 +91,9 @@ export function SearchWorkspace({
     controller.current?.abort();
     controller.current = null;
     setReport(null);
+    setResearchResult(null);
+    setResearchPhase("");
+    setActiveResearchJob(null);
     setReportWorkspaceId("");
     setStage("idle");
     setError("");
@@ -98,10 +104,6 @@ export function SearchWorkspace({
     clearActionError();
     inspect(null);
   }, [clearActionError, inspect, setFilters, setSubmittedQuery, workspaceId]);
-  useEffect(() => {
-    if (!assistedAvailable && assistedEnabled) setAssistedEnabled(false);
-  }, [assistedAvailable, assistedEnabled, setAssistedEnabled]);
-
   const runSearch = async () => {
     const value = query.trim();
     if (!workspaceId || !value) return;
@@ -113,14 +115,48 @@ export function SearchWorkspace({
     controller.current = current;
     setStage("searching");
     setError("");
+    setResearchResult(null);
     try {
-      const result = await api.search(
-        requestedWorkspaceId,
-        value,
-        assistedEnabled ? "assisted" : "local",
-        filters,
-        current.signal,
-      );
+      let result: SearchReportV2;
+      if (searchMode === "research") {
+        const started = await api.startResearch(requestedWorkspaceId, value, filters);
+        setActiveResearchJob(started);
+        queryClient.setQueryData<ServiceJob[]>(["jobs", requestedWorkspaceId], (jobs = []) => [
+          started,
+          ...jobs.filter((item) => item.job_id !== started.job_id),
+        ]);
+        const completed = await waitForJob(started, {
+          signal: current.signal,
+          onUpdate: (job) => {
+            setActiveResearchJob(job);
+            setResearchPhase(researchPhaseLabel(job.result.progress?.phase));
+            queryClient.setQueryData<ServiceJob[]>(
+              ["jobs", requestedWorkspaceId],
+              (jobs = []) => [job, ...jobs.filter((item) => item.job_id !== job.job_id)],
+            );
+          },
+        });
+        const research = api.researchResult(completed);
+        setResearchResult(research);
+        result = {
+          query: research.query,
+          requested_mode: "assisted",
+          actual_mode: research.actual_mode === "degraded" ? "degraded" : "assisted",
+          degradation_reason: research.degradation_reason,
+          answer: research.answer,
+          results: research.results,
+          candidate_count: research.results.length,
+          duration_ms: research.duration_ms ?? 0,
+        };
+      } else {
+        result = await api.search(
+          requestedWorkspaceId,
+          value,
+          "local",
+          filters,
+          current.signal,
+        );
+      }
       if (
         currentSequence !== sequence.current ||
         useAppStore.getState().workspaceId !== requestedWorkspaceId
@@ -137,7 +173,28 @@ export function SearchWorkspace({
       if (currentSequence !== sequence.current) return;
       setStage("idle");
       setError(reason instanceof ApiError ? reason.message : "搜索没有完成，请重试。 ");
+    } finally {
+      if (currentSequence === sequence.current) setActiveResearchJob(null);
     }
+  };
+
+  const cancelResearch = async () => {
+    if (!activeResearchJob) return;
+    controller.current?.abort();
+    try {
+      await api.cancelJob(activeResearchJob.job_id);
+      setStage("idle");
+      setResearchPhase("");
+      setError("研究任务已取消，本地资料和已有结果均未改变。");
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : "研究任务暂时无法取消。");
+    }
+  };
+
+  const selectCitation = (citationId: string) => {
+    const citation = researchResult?.citations.find((item) => item.citation_id === citationId);
+    const result = report?.results.find((item) => item.document_id === citation?.document_id);
+    if (result) inspect(result);
   };
 
   const toggleExtensionGroup = (values: string[]) => {
@@ -184,19 +241,13 @@ export function SearchWorkspace({
     <div className="searchPage">
       <header className="searchLead">
         <div>
-          <h1>搜索原始资料</h1>
-          <p>按文件名、章节和正文定位可核验的页面证据。</p>
+          <h1>{searchMode === "lookup" ? "查找原始资料" : "研究本地问题"}</h1>
+          <p>{searchMode === "lookup" ? "按文件名、章节和正文定位可核验的页面证据。" : "拆解问题并仅使用当前资料空间生成带引用的回答。"}</p>
         </div>
-        {assistedAvailable && (
-          <label className="assistToggle">
-            <input
-              type="checkbox"
-              checked={assistedEnabled}
-              onChange={(event) => setAssistedEnabled(event.target.checked)}
-            />
-            <Sparkles size={15} />辅助整理
-          </label>
-        )}
+        <div className="searchModeSwitch" role="group" aria-label="搜索模式">
+          <button className={searchMode === "lookup" ? "modeActive" : ""} onClick={() => setSearchMode("lookup")}><Search size={15} />查资料</button>
+          <button className={searchMode === "research" ? "modeActive" : ""} onClick={() => setSearchMode("research")}><Sparkles size={15} />研究问题</button>
+        </div>
       </header>
 
       <form className="primarySearch" onSubmit={(event) => { event.preventDefault(); void runSearch(); }}>
@@ -205,7 +256,7 @@ export function SearchWorkspace({
           id="workspace-search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="输入文件名、章节或正文，例如：微分方程"
+          placeholder={searchMode === "lookup" ? "输入文件名、章节或正文，例如：微分方程" : "输入需要用本地资料回答的问题"}
           aria-label="搜索原始资料"
           autoFocus
         />
@@ -215,8 +266,8 @@ export function SearchWorkspace({
           </button>
         )}
         <button className="primaryButton" type="submit" disabled={!query.trim() || stage === "searching"}>
-          {stage === "searching" ? <LoaderCircle className="spin" size={17} /> : <Search size={17} />}
-          搜索
+          {stage === "searching" ? <LoaderCircle className="spin" size={17} /> : searchMode === "research" ? <Sparkles size={17} /> : <Search size={17} />}
+          {searchMode === "research" ? "开始研究" : "搜索"}
         </button>
       </form>
 
@@ -244,6 +295,9 @@ export function SearchWorkspace({
           {stage === "ready" && report && `找到 ${report.results.length} 份资料 · ${report.duration_ms} ms`}
           {stage === "degraded" && report && `找到 ${report.results.length} 份资料 · 本次使用本地检索`}
         </span>
+        {stage === "searching" && searchMode === "research" && (
+          <button className="textButton smallButton" onClick={() => void cancelResearch()}>取消</button>
+        )}
       </div>
 
       {filterOpen && (
@@ -287,6 +341,15 @@ export function SearchWorkspace({
           <span>{actionError}</span>
           <button className="iconButton" onClick={clearActionError} aria-label="关闭加入任务错误" title="关闭"><X size={17} /></button>
         </div>
+      )}
+
+      {report?.answer && reportWorkspaceId === workspaceId && (
+        <section className="researchAnswer" aria-label="研究回答">
+          <div className="researchAnswerTitle"><Sparkles size={17} /><strong>{searchMode === "research" ? "研究结论" : "检索摘要"}</strong>{researchPhase && stage === "searching" && <span>{researchPhase}</span>}</div>
+          <p><CitationAnswer answer={report.answer} onCitation={selectCitation} /></p>
+          {researchResult?.warnings.map((warning) => <div className="warningBox" role="status" key={warning}>{warning}</div>)}
+          {stage === "degraded" && <small>辅助模型不可用，本次回答保留本地检索结果。{report.degradation_reason ? ` 原因：${report.degradation_reason}` : ""}</small>}
+        </section>
       )}
 
       {!report && !error && stage === "idle" && (
@@ -334,6 +397,29 @@ export function SearchWorkspace({
       )}
     </div>
   );
+}
+
+function researchPhaseLabel(phase?: string): string {
+  if (phase === "understanding") return "理解问题";
+  if (phase === "retrieving") return "检索证据";
+  if (phase === "composing") return "组织回答";
+  if (phase === "completed") return "完成";
+  return "准备研究";
+}
+
+function CitationAnswer({
+  answer,
+  onCitation,
+}: {
+  answer: string;
+  onCitation: (citationId: string) => void;
+}) {
+  return <>{answer.split(/(\[R\d+\])/g).map((part, index) => {
+    const match = part.match(/^\[(R\d+)\]$/);
+    return match
+      ? <button className="citationLink" key={`${part}-${index}`} onClick={() => onCitation(match[1] ?? "")}>{part}</button>
+      : part;
+  })}</>;
 }
 
 function ResultRow({

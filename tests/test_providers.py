@@ -210,6 +210,26 @@ def test_heuristic_and_provider_factory(
         create_provider(config, require_network=True)
 
 
+def test_connection_probes_structured_and_single_image_capabilities(
+    repository: tuple[Path, Path, RepositoryConfig],
+) -> None:
+    _, _, config = repository
+    provider, completions = _provider(config, ["OK", '{"ok": true}', "red"])
+
+    capabilities = provider.test_connection()
+
+    assert capabilities.model_dump() == {
+        "text": True,
+        "structured_output": True,
+        "vision": True,
+        "file_upload": False,
+    }
+    assert completions.calls == 3
+    vision_content = completions.requests[2]["messages"][0]["content"]
+    assert len([item for item in vision_content if item["type"] == "image_url"]) == 1
+    assert vision_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 def test_prompt_version_and_token_cost_budgets(
     repository: tuple[Path, Path, RepositoryConfig],
 ) -> None:

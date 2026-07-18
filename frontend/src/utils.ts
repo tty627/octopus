@@ -55,6 +55,7 @@ export function documentQualityLabel(
   readability: Readability,
 ): string {
   if (indexingState === "failed") return "处理失败";
+  if (indexingState === "pending") return "等待处理";
   if (indexingState === "metadata_only") return "仅文件信息";
   return readabilityLabel(readability);
 }
@@ -65,6 +66,7 @@ export function searchEvidenceText(
   excerpt: string,
 ): string {
   if (indexingState === "failed") return "文件处理失败，可按文件名查找。";
+  if (indexingState === "pending") return "文件已发现，正文仍在后台处理。";
   if (indexingState === "metadata_only") return "当前仅提供文件名、路径和元数据检索。";
   if (readability === "low") return "正文识别质量较低，可按文件名查找。";
   return excerpt;

@@ -6,6 +6,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from .citations import (
@@ -53,6 +54,20 @@ def _source_export_name(item: WorkspaceTaskItem) -> str:
     return f"{stem}-{digest}{suffix}"
 
 
+def _item_review_label(item: WorkspaceTaskItem) -> str:
+    if item.freshness_status in {"changed", "stale", "needs_review"}:
+        return "来源已变化，需重新核验"
+    if item.source_status != "resolved" or item.freshness_status in {"missing", "unavailable"}:
+        return "来源不可访问"
+    if (
+        item.review_state == "confirmed"
+        and item.verified_content_hash
+        and item.verified_content_hash == item.content_hash
+    ):
+        return "已人工核验"
+    return "未人工核验"
+
+
 def _render_markdown(task: WorkspaceTask, style: CitationStyle) -> str:
     lines = [f"# {task.title}", ""]
     if task.goal:
@@ -87,7 +102,7 @@ def _render_markdown(task: WorkspaceTask, style: CitationStyle) -> str:
             locator = item.locator.label if item.locator and item.locator.label else ""
             if not locator and item.page_number:
                 locator = f"第 {item.page_number} 页"
-            status = "待重新核验" if item.freshness_status in {"changed", "missing"} else "已确认"
+            status = _item_review_label(item)
             location = f" · {locator}" if locator else ""
             lines.append(
                 f"- **{item.name}** · {status}{location} · [{number}]({_item_source_label(item)})"
@@ -106,6 +121,7 @@ def export_research_bundle(
     *,
     citation_style: CitationStyle = DEFAULT_CITATION_STYLE,
     include_sources: bool = False,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> Path:
     """Create a local, deterministic research bundle without mutating raw sources."""
     style = citation_style
@@ -113,6 +129,10 @@ def export_research_bundle(
     if workspace is None:
         raise FileNotFoundError("Workspace not found")
     task = _reconfirm_task_sources(task)
+    if progress_callback is not None:
+        progress_callback(
+            {"phase": "verifying", "completed": 0, "total": len(task.items)}
+        )
     store = WorkspaceStore(workspace)
     export_root = Path(workspace.storage_path).expanduser().resolve() / "exports"
     export_root.mkdir(parents=True, exist_ok=True)
@@ -128,7 +148,7 @@ def export_research_bundle(
             render_bibliography(citations, style) + ("\n" if citations else ""),
         )
         manifest: dict[str, object] = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "task_id": task.task_id,
             "workspace_id": task.workspace_id,
             "title": task.title,
@@ -137,7 +157,7 @@ def export_research_bundle(
             "items": [],
         }
         sources_root = temporary_dir / "sources"
-        for item in task.items:
+        for item_number, item in enumerate(task.items, start=1):
             entry: dict[str, object] = {
                 "item_id": item.item_id,
                 "document_id": item.document_id,
@@ -146,7 +166,11 @@ def export_research_bundle(
                 "source_ref": item.source_ref.model_dump(mode="json") if item.source_ref else None,
                 "content_hash": item.content_hash,
                 "verified_content_hash": item.verified_content_hash,
+                "verified_at": item.verified_at,
+                "review_state": item.review_state,
                 "freshness_status": item.freshness_status,
+                "source_status": item.source_status,
+                "review_label": _item_review_label(item),
                 "included_source": False,
             }
             if (
@@ -177,9 +201,27 @@ def export_research_bundle(
                     entry["export_path"] = destination.relative_to(temporary_dir).as_posix()
                 except (OSError, ValueError, FileNotFoundError) as error:
                     entry["source_error"] = str(error)[:500]
+                    entry["excluded_reason"] = "source_copy_failed"
+            elif not include_sources:
+                entry["excluded_reason"] = "source_copy_not_requested"
+            elif item.source_status != "resolved":
+                entry["excluded_reason"] = "source_unavailable"
+            elif item.review_state != "confirmed":
+                entry["excluded_reason"] = "not_human_verified"
+            else:
+                entry["excluded_reason"] = "source_not_current"
             cast_items = manifest["items"]
             assert isinstance(cast_items, list)
             cast_items.append(entry)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "collecting_sources",
+                        "completed": item_number,
+                        "total": len(task.items),
+                        "current_file": item.name,
+                    }
+                )
         atomic_write_text(
             temporary_dir / "manifest.json",
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -189,11 +231,27 @@ def export_research_bundle(
             json.dumps(task.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
         )
         temporary_output = output.with_suffix(".tmp.zip")
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "packaging",
+                    "completed": len(task.items),
+                    "total": len(task.items),
+                }
+            )
         with zipfile.ZipFile(temporary_output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(temporary_dir.rglob("*")):
                 if path.is_file():
                     archive.write(path, path.relative_to(temporary_dir).as_posix())
         temporary_output.replace(output)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "completed",
+                    "completed": len(task.items),
+                    "total": len(task.items),
+                }
+            )
         return output
     finally:
         shutil.rmtree(temporary_dir, ignore_errors=True)

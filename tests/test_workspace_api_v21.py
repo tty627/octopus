@@ -3,10 +3,14 @@ from __future__ import annotations
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from octopus.api import create_app
+from octopus.credentials import ResolvedCredential
+from octopus.providers import ProviderCapabilities
 from octopus.workspace_v2 import WorkspaceStore, create_workspace
 
 TOKEN = "v21-test-token-that-is-long-enough"
@@ -22,6 +26,31 @@ def _wait_for_job(client: TestClient, headers: dict[str, str], job_id: str) -> d
             return payload
         time.sleep(0.01)
     raise AssertionError("V2 job did not finish")
+
+
+@pytest.mark.parametrize(
+    ("error_name", "expected_code"),
+    [
+        ("ProviderAuthError", "auth_failed"),
+        ("ProviderQuotaError", "quota_exhausted"),
+        ("ProviderRateLimitError", "rate_limited"),
+        ("ProviderTransientError", "unavailable"),
+        ("ProviderOutputError", "invalid_response"),
+        ("RuntimeError", "invalid_configuration"),
+    ],
+)
+def test_ai_connection_errors_have_actionable_codes(
+    error_name: str,
+    expected_code: str,
+) -> None:
+    import octopus.providers as provider_module
+    import octopus.workspace_api_v2 as api_module
+
+    error_type = getattr(provider_module, error_name, RuntimeError)
+    code, message = api_module._ai_error(error_type("test failure"))
+
+    assert code == expected_code
+    assert message
 
 
 def test_v21_api_sources_research_export_changes_and_jobs(tmp_path: Path) -> None:
@@ -172,6 +201,38 @@ def test_v21_api_sources_research_export_changes_and_jobs(tmp_path: Path) -> Non
         assert exported.content.startswith(b"PK")
         assert "application/zip" in exported.headers["content-type"]
 
+        export_job_response = client.post(
+            f"{task_url}/exports",
+            headers=headers,
+            json={"citation_style": "apa", "include_sources": True},
+        )
+        assert export_job_response.status_code == 202
+        export_job = _wait_for_job(
+            client,
+            headers,
+            export_job_response.json()["job_id"],
+        )
+        assert export_job["status"] == "succeeded"
+        artifact = export_job["result"]
+        assert isinstance(artifact, dict)
+        assert artifact["included_source_count"] == 1
+        artifact_response = client.get(
+            (
+                f"/v2/workspaces/{workspace.workspace_id}/exports/"
+                f"{artifact['artifact_id']}"
+            ),
+            headers=headers,
+        )
+        assert artifact_response.status_code == 200
+        assert artifact_response.content.startswith(b"PK")
+        assert artifact_response.headers["x-octopus-artifact-id"] == artifact["artifact_id"]
+        assert artifact_response.headers["x-octopus-artifact-sha256"] == artifact["sha256"]
+        missing_artifact = client.get(
+            f"/v2/workspaces/{workspace.workspace_id}/exports/not-an-artifact",
+            headers=headers,
+        )
+        assert missing_artifact.status_code == 404
+
         changes = client.get(
             f"/v2/workspaces/{workspace.workspace_id}/changes",
             headers=headers,
@@ -226,3 +287,203 @@ def test_v21_api_sources_research_export_changes_and_jobs(tmp_path: Path) -> Non
         )
         assert archived.status_code == 200
         assert archived.json()["lifecycle"] == "archived"
+
+
+def test_async_research_and_proposal_jobs_keep_retry_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import octopus.workspace_api_v2 as api_module
+
+    raw = tmp_path / "async-research"
+    raw.mkdir()
+    workspace = create_workspace(raw, "Async Research")
+    progress_events: list[dict[str, object]] = []
+
+    def fake_research(
+        workspace_id: str,
+        question: str,
+        progress,
+        *,
+        limit: int,
+        search_options: dict[str, object],
+    ) -> dict[str, object]:
+        assert workspace_id == workspace.workspace_id
+        assert question == "本地证据如何支持结论"
+        assert limit == 12
+        assert search_options["extensions"] == [".pdf"]
+        progress({"phase": "retrieving", "completed": 1, "total": 2})
+        progress_events.append({"question": question})
+        return {
+            "answer": "结论来自本地证据 [R1]",
+            "citations": [{"citation_id": "R1"}],
+            "results": [],
+        }
+
+    class FakeProposal:
+        candidates = [SimpleNamespace(candidate_id="candidate-1")]
+
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {
+                "proposal_id": "proposal-1",
+                "workspace_id": workspace.workspace_id,
+                "candidates": [{"candidate_id": "candidate-1"}],
+                "slots": [],
+            }
+
+    monkeypatch.setattr(api_module, "run_workspace_research", fake_research)
+    monkeypatch.setattr(
+        api_module,
+        "create_research_proposal",
+        lambda workspace_id, goal, title, template_id: FakeProposal(),
+    )
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    app = create_app(token=TOKEN, start_scheduler=False)
+
+    with TestClient(app) as client:
+        research_response = client.post(
+            f"/v2/workspaces/{workspace.workspace_id}/research",
+            headers=headers,
+            json={
+                "question": "本地证据如何支持结论",
+                "limit": 12,
+                "extensions": [".pdf"],
+                "readability": ["readable"],
+                "indexing_states": ["indexed"],
+                "source_kinds": ["physical"],
+            },
+        )
+        assert research_response.status_code == 202
+        research_job = _wait_for_job(
+            client,
+            headers,
+            research_response.json()["job_id"],
+        )
+        assert research_job["status"] == "succeeded"
+        assert research_job["result"]["answer"] == "结论来自本地证据 [R1]"
+        assert research_job["result"]["progress"]["retry_payload"]["kind"] == (
+            "workspace_research"
+        )
+        assert progress_events == [{"question": "本地证据如何支持结论"}]
+
+        proposal_response = client.post(
+            f"/v2/workspaces/{workspace.workspace_id}/task-proposals/jobs",
+            headers=headers,
+            json={
+                "goal": "整理本地证据",
+                "title": "证据提案",
+                "template_id": "free_research",
+            },
+        )
+        assert proposal_response.status_code == 202
+        proposal_job = _wait_for_job(
+            client,
+            headers,
+            proposal_response.json()["job_id"],
+        )
+        assert proposal_job["status"] == "succeeded"
+        assert proposal_job["result"]["proposal"]["proposal_id"] == "proposal-1"
+        proposal_progress = proposal_job["result"]["progress"]
+        assert proposal_progress["phase"] == "completed"
+        assert proposal_progress["evidence_count"] == 1
+        assert proposal_progress["retry_payload"]["kind"] == "task_proposal"
+
+
+def test_ai_settings_persist_glm_capabilities_and_test_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import octopus.workspace_api_v2 as api_module
+
+    raw = tmp_path / "ai-settings"
+    raw.mkdir()
+    workspace = create_workspace(raw, "AI Settings")
+    stored: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(api_module, "read_stored_ai_api_key", lambda _: "previous-key")
+    monkeypatch.setattr(
+        api_module,
+        "save_stored_ai_api_key",
+        lambda workspace_id, provider, api_key: stored.append(
+            (workspace_id, provider, api_key)
+        ),
+    )
+    monkeypatch.setattr(api_module, "delete_stored_ai_api_key", lambda _: None)
+    monkeypatch.setattr(
+        api_module,
+        "resolve_ai_api_key",
+        lambda workspace_id, provider: ResolvedCredential("configured-key", "test"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "test_ai_connection",
+        lambda config, api_key: ProviderCapabilities(
+            text=True,
+            structured_output=True,
+            vision=True,
+            file_upload=False,
+        ),
+    )
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    app = create_app(token=TOKEN, start_scheduler=False)
+
+    with TestClient(app) as client:
+        initial = client.get(
+            f"/v2/workspaces/{workspace.workspace_id}/ai-settings",
+            headers=headers,
+        )
+        assert initial.status_code == 200
+        assert initial.json()["credential_configured"] is True
+
+        updated = client.put(
+            f"/v2/workspaces/{workspace.workspace_id}/ai-settings",
+            headers=headers,
+            json={
+                "enabled": True,
+                "provider": "openai_compatible",
+                "preset": "glm",
+                "base_url": "https://unused.example/v1",
+                "model": "glm-confirmed-model",
+                "api_key": "new-key",
+                "tested_capabilities": {
+                    "text": True,
+                    "structured_output": True,
+                    "vision": True,
+                    "file_upload": False,
+                },
+            },
+        )
+        assert updated.status_code == 200
+        payload = updated.json()
+        assert payload["preset"] == "glm"
+        assert payload["provider"] == "openai_compatible"
+        assert payload["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+        assert payload["capabilities"]["vision"] is True
+        assert stored == [
+            (workspace.workspace_id, "openai_compatible", "new-key")
+        ]
+
+        tested = client.post(
+            f"/v2/workspaces/{workspace.workspace_id}/ai-settings/test",
+            headers=headers,
+            json={
+                "enabled": True,
+                "provider": "openai_compatible",
+                "preset": "glm",
+                "base_url": "https://unused.example/v1",
+                "model": "glm-confirmed-model",
+                "api_key": "new-key",
+            },
+        )
+        assert tested.status_code == 200
+        assert tested.json() == {
+            "ok": True,
+            "code": "connected",
+            "message": "已连接 glm-confirmed-model。",
+            "capabilities": {
+                "text": True,
+                "structured_output": True,
+                "vision": True,
+                "file_upload": False,
+            },
+        }

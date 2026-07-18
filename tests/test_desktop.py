@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import io
+import json
 import sys
+import urllib.error
+import urllib.request
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -200,6 +205,109 @@ def test_runtime_client_restarts_an_older_local_api(
     assert started == [True]
 
 
+def test_local_api_client_serializes_json_and_maps_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LocalApiClient("http://127.0.0.1:9876", "memory-token")
+    requests: list[urllib.request.Request] = []
+
+    def success(request: urllib.request.Request, *, timeout: float):
+        requests.append(request)
+        assert timeout == client.timeout
+        return io.BytesIO(json.dumps({"saved": True}).encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", success)
+    assert client._request("POST", "/v2/test", {"name": "研究包"}) == {"saved": True}
+    request = requests[0]
+    assert request.full_url == "http://127.0.0.1:9876/v2/test"
+    assert request.method == "POST"
+    assert request.get_header("Authorization") == "Bearer memory-token"
+    assert json.loads(request.data.decode("utf-8")) == {"name": "研究包"}
+
+    def unauthorized(*args: Any, **kwargs: Any):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:9876/v2/test",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b'{"detail":"bad key"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", unauthorized)
+    with pytest.raises(DesktopServiceError) as captured:
+        client._request("GET", "/v2/test")
+    assert captured.value.status_code == 401
+    assert str(captured.value) == "bad key"
+
+    def offline(*args: Any, **kwargs: Any):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", offline)
+    with pytest.raises(DesktopServiceError) as captured:
+        client._request("GET", "/v2/test")
+    assert captured.value.code == "service_unavailable"
+
+
+def test_local_api_client_streams_artifacts_and_preserves_download_errors(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LocalApiClient("http://127.0.0.1:9876", "memory-token")
+    archive = b"PK" + (b"research archive" * 100)
+    requests: list[urllib.request.Request] = []
+
+    def success(request: urllib.request.Request, *, timeout: float):
+        requests.append(request)
+        assert timeout == 15
+        return io.BytesIO(archive)
+
+    monkeypatch.setattr(urllib.request, "urlopen", success)
+    destination = tmp_path / "artifact.tmp"
+    written = client.download_export_artifact(
+        "workspace with spaces",
+        "a" * 32,
+        destination,
+        timeout=15,
+    )
+    assert written == len(archive)
+    assert destination.read_bytes() == archive
+    assert requests[0].full_url.endswith(
+        "/v2/workspaces/workspace%20with%20spaces/exports/" + ("a" * 32)
+    )
+    assert requests[0].get_header("Accept") == "application/zip"
+
+    def expired(*args: Any, **kwargs: Any):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:9876/export",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'{"detail":"artifact expired"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", expired)
+    with pytest.raises(DesktopServiceError) as captured:
+        client.download_export_artifact(
+            "workspace",
+            "b" * 32,
+            tmp_path / "missing.tmp",
+        )
+    assert captured.value.code == "artifact_download_failed"
+    assert captured.value.status_code == 404
+    assert str(captured.value) == "artifact expired"
+
+    def interrupted(*args: Any, **kwargs: Any):
+        raise urllib.error.URLError("stream interrupted")
+
+    monkeypatch.setattr(urllib.request, "urlopen", interrupted)
+    with pytest.raises(DesktopServiceError, match="stream interrupted"):
+        client.download_export_artifact(
+            "workspace",
+            "c" * 32,
+            tmp_path / "interrupted.tmp",
+        )
+
+
 def test_frozen_gui_uses_sibling_cli_for_background_commands(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
@@ -256,9 +364,71 @@ def test_webview_bridge_only_exposes_whitelisted_public_state() -> None:
         "choose_directory",
         "load_ui_state",
         "open_uri",
+        "reveal_saved_file",
+        "save_export_file",
         "save_text_file",
         "save_ui_state",
     }
+
+
+def test_export_save_cancel_overwrite_and_temp_cleanup(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_id = "a" * 32
+    downloads: list[Any] = []
+
+    class ArtifactClient:
+        base_url = "http://127.0.0.1:9876"
+        token = "memory-token"
+
+        def download_export_artifact(
+            self,
+            workspace_id: str,
+            received_artifact_id: str,
+            destination: Any,
+        ) -> int:
+            downloads.append((workspace_id, received_artifact_id, destination))
+            destination.write_bytes(b"new archive")
+            return len(b"new archive")
+
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(SAVE_DIALOG="save"))
+    client = ArtifactClient()
+    bridge = DesktopBridge(client)  # type: ignore[arg-type]
+    bridge._attach(SimpleNamespace(create_file_dialog=lambda *_, **__: None))
+    assert bridge.save_export_file("workspace", artifact_id, "research.zip") == {
+        "saved": False
+    }
+    assert downloads == []
+
+    destination = tmp_path / "research.zip"
+    destination.write_bytes(b"old archive")
+    bridge._attach(
+        SimpleNamespace(create_file_dialog=lambda *_, **__: [str(destination)])
+    )
+    saved = bridge.save_export_file("workspace", artifact_id, "research.zip")
+    assert saved["saved"] is True
+    assert saved["file"] == "research.zip"
+    assert destination.read_bytes() == b"new archive"
+    assert not list(tmp_path.glob(".research.zip.*.tmp"))
+
+    class FailingClient(ArtifactClient):
+        def download_export_artifact(self, *args: Any) -> int:
+            destination_path = args[2]
+            destination_path.write_bytes(b"partial")
+            raise OSError("disk full")
+
+    failing = DesktopBridge(FailingClient())  # type: ignore[arg-type]
+    failing._attach(
+        SimpleNamespace(create_file_dialog=lambda *_, **__: [str(destination)])
+    )
+    with pytest.raises(OSError, match="disk full"):
+        failing.save_export_file("workspace", "b" * 32, "research.zip")
+    assert destination.read_bytes() == b"new archive"
+    assert not list(tmp_path.glob(".research.zip.*.tmp"))
+
+    with pytest.raises(ValueError, match="Invalid export artifact ID"):
+        bridge.save_export_file("workspace", "../source", "research.zip")
 
 
 def test_webview_bridge_persists_v1_and_v2_navigation_state() -> None:

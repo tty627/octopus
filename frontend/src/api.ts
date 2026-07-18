@@ -1,10 +1,17 @@
 import { bootstrapDesktop } from "./bridge";
-import { mockContentUrl, mockPreviewUrl, mockRequest, mockResearchPackBlob } from "./mockApi";
+import {
+  mockContentUrl,
+  mockExportArtifactBlob,
+  mockPreviewUrl,
+  mockRequest,
+  mockResearchPackBlob,
+} from "./mockApi";
 import type {
   AIConnectionResult,
   AISettingsInputV2,
   AISettingsV2,
   AIIndexStatus,
+  AIProviderPreset,
   BootstrapPayload,
   SearchFiltersV2,
   SearchReportV2,
@@ -18,6 +25,9 @@ import type {
   WorkspaceTaskSummary,
   TaskTemplateId,
   ResearchTaskProposal,
+  WorkspaceResearchResult,
+  VisionAnalysis,
+  VisionPreflight,
 } from "./types";
 
 export class ApiError extends Error {
@@ -102,12 +112,14 @@ async function previewUrl(
   documentId: string,
   page: number,
   highlight = "",
+  variant: "base" | "highlighted" = highlight ? "highlighted" : "base",
 ): Promise<string> {
   const runtime = await runtimeBootstrap();
   if (runtime.base_url.startsWith("mock:")) return mockPreviewUrl(documentId, page);
-  const highlightQuery = highlight ? `?highlight=${encodeURIComponent(highlight)}` : "";
+  const parameters = new URLSearchParams({ variant });
+  if (highlight) parameters.set("highlight", highlight);
   const response = await fetch(
-    `${runtime.base_url}/v2/workspaces/${workspaceId}/documents/${documentId}/pages/${page}/preview${highlightQuery}`,
+    `${runtime.base_url}/v2/workspaces/${workspaceId}/documents/${documentId}/pages/${page}/preview?${parameters}`,
     { headers: { Authorization: `Bearer ${runtime.token}` } },
   );
   if (!response.ok) throw new ApiError("页面预览暂时不可用。", response.status);
@@ -143,6 +155,25 @@ async function taskExport(
       },
       body: JSON.stringify(options),
     },
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new ApiError(apiErrorMessage(response.status, detail), response.status, detail);
+  }
+  return response.blob();
+}
+
+async function exportArtifact(
+  workspaceId: string,
+  artifactId: string,
+): Promise<Blob> {
+  const runtime = await runtimeBootstrap();
+  if (runtime.base_url.startsWith("mock:")) {
+    return mockExportArtifactBlob(artifactId);
+  }
+  const response = await fetch(
+    `${runtime.base_url}/v2/workspaces/${workspaceId}/exports/${artifactId}`,
+    { headers: { Authorization: `Bearer ${runtime.token}` } },
   );
   if (!response.ok) {
     const detail = await response.text();
@@ -195,10 +226,18 @@ export const api = {
     request<AISettingsV2>(`/v2/workspaces/${workspaceId}/ai-settings`),
   aiIndexStatus: (workspaceId: string) =>
     request<AIIndexStatus>(`/v2/workspaces/${workspaceId}/ai-index`),
-  startAIIndex: (workspaceId: string, limit = 20) =>
+  aiProviderPresets: () => request<AIProviderPreset[]>("/v2/ai-provider-presets"),
+  startAIIndex: (
+    workspaceId: string,
+    options: number | {
+      scope?: "all" | "documents" | "folders";
+      max_calls?: number;
+      retry_failed?: boolean;
+    } = {},
+  ) =>
     request<ServiceJob>(`/v2/workspaces/${workspaceId}/ai-index`, {
       method: "POST",
-      body: { limit },
+      body: typeof options === "number" ? { limit: options } : options,
     }),
   saveAISettings: (workspaceId: string, settings: AISettingsInputV2) =>
     request<AISettingsV2>(`/v2/workspaces/${workspaceId}/ai-settings`, {
@@ -214,6 +253,22 @@ export const api = {
     request<{ workspace_id: string; vision_enabled: boolean }>(
       `/v2/workspaces/${workspaceId}/vision-authorization`,
       { method: "PUT", body: { vision_enabled } },
+    ),
+  visionPreflight: (workspaceId: string, documentId: string, page_number: number) =>
+    request<VisionPreflight>(
+      `/v2/workspaces/${workspaceId}/documents/${documentId}/vision/preflight`,
+      { method: "POST", body: { page_number } },
+    ),
+  analyzeVisionPage: (
+    workspaceId: string,
+    documentId: string,
+    page_number: number,
+    prompt: string,
+    confirm_image_send: boolean,
+  ) =>
+    request<VisionAnalysis>(
+      `/v2/workspaces/${workspaceId}/documents/${documentId}/vision/analyze`,
+      { method: "POST", body: { page_number, prompt, confirm_image_send } },
     ),
   tasks: (workspaceId: string) =>
     request<WorkspaceTaskSummary[]>(`/v2/workspaces/${workspaceId}/tasks`),
@@ -231,6 +286,16 @@ export const api = {
     request<ResearchTaskProposal>(`/v2/workspaces/${workspaceId}/task-proposals`, {
       method: "POST",
       body: { goal, title, template_id },
+    }),
+  startResearchProposal: (workspaceId: string, goal: string, title = "", template_id = "free_research") =>
+    request<ServiceJob>(`/v2/workspaces/${workspaceId}/task-proposals/jobs`, {
+      method: "POST",
+      body: { goal, title, template_id },
+    }),
+  startResearch: (workspaceId: string, question: string, filters: SearchFiltersV2) =>
+    request<ServiceJob>(`/v2/workspaces/${workspaceId}/research`, {
+      method: "POST",
+      body: { question, limit: 50, ...filters },
     }),
   confirmResearchProposal: (workspaceId: string, proposal: ResearchTaskProposal) =>
     request<WorkspaceTask>(`/v2/workspaces/${workspaceId}/task-proposals/confirm`, {
@@ -254,6 +319,12 @@ export const api = {
       `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/markdown`,
     ),
   taskExport,
+  startTaskExport: (task: WorkspaceTask, options: ResearchPackExportRequest) =>
+    request<ServiceJob>(
+      `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/exports`,
+      { method: "POST", body: options },
+    ),
+  exportArtifact,
   revalidateTask: (task: WorkspaceTask) =>
     request<WorkspaceTask>(
       `/v2/workspaces/${task.workspace_id}/tasks/${task.task_id}/revalidate`,
@@ -264,6 +335,7 @@ export const api = {
   jobs: (workspaceId: string, signal?: AbortSignal) =>
     request<ServiceJob[]>(`/v2/jobs?workspace_id=${encodeURIComponent(workspaceId)}`, { signal }),
   job: (jobId: string) => request<ServiceJob>(`/v2/jobs/${jobId}`),
+  researchResult: (job: ServiceJob) => job.result as unknown as WorkspaceResearchResult,
   cancelJob: (jobId: string) =>
     request<ServiceJob>(`/v2/jobs/${jobId}/cancel`, { method: "POST" }),
 };

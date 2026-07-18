@@ -579,6 +579,7 @@ describe("workspace-bound evidence", () => {
       "document-1",
       3,
       "级数",
+      "highlighted",
     ));
     await userEvent.clear(screen.getByRole("textbox", { name: "搜索原始资料" }));
     await userEvent.type(screen.getByRole("textbox", { name: "搜索原始资料" }), "微分方程");
@@ -724,14 +725,30 @@ describe("authoritative settings", () => {
   });
 
   it("refetches authoritative state when the second save stage fails", async () => {
-    const authoritative = aiSettings({ credential_configured: true, credential_source: "windows_credential" });
+    const authoritative = aiSettings({
+      credential_configured: true,
+      credential_source: "windows_credential",
+      capabilities: {
+        text: true,
+        structured_output: true,
+        vision: true,
+        file_upload: false,
+      },
+    });
     vi.spyOn(api, "aiSettings").mockResolvedValue(authoritative);
     vi.spyOn(api, "saveAISettings").mockResolvedValue(authoritative);
     vi.spyOn(api, "setVisionAuthorization").mockRejectedValue(new ApiError("授权保存失败", 500));
     useAppStore.setState({ workspaceId: "workspace-1" });
     const client = renderWithClient(<AISettingsView />);
 
-    const vision = await screen.findByRole("checkbox", { name: "允许发送疑难页面图像" });
+    vi.spyOn(api, "testAISettings").mockResolvedValue({
+      ok: true,
+      code: "connected",
+      message: "连接成功",
+      capabilities: authoritative.capabilities,
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "测试连接" }));
+    const vision = await screen.findByRole("checkbox", { name: "允许发送明确选择的单页图像" });
     await userEvent.click(vision);
     await userEvent.click(screen.getByRole("button", { name: "保存设置" }));
 

@@ -1,6 +1,6 @@
 export type PageId = "home" | "search" | "tasks" | "documents" | "settings";
 export type Readability = "readable" | "partial" | "low";
-export type IndexingState = "indexed" | "metadata_only" | "failed";
+export type IndexingState = "indexed" | "metadata_only" | "failed" | "pending";
 export type SourceKind = "physical" | "archive" | "archive_member";
 export type FreshnessStatus = "current" | "stale" | "unavailable" | "needs_review" | "changed" | "missing" | "unverified";
 export type CitationStyle = "gb-t-7714-2015" | "apa";
@@ -67,6 +67,8 @@ export interface WorkspaceHealth {
   low_quality_count: number;
   metadata_only_count: number;
   failed_count: number;
+  queued_count?: number;
+  processing_count?: number;
   last_sync_at: string;
 }
 
@@ -95,6 +97,11 @@ export interface WorkspaceDocument {
   readability: Readability;
   readability_score: number;
   indexing_state: IndexingState;
+  processing_state?: "queued" | "processing" | "ready" | "failed";
+  processing_error?: string;
+  processing_updated_at?: string;
+  ocr_completed_pages?: number;
+  ocr_pending_pages?: number;
   error: string;
   source_uri: string;
   source_ref?: SourceRef | null;
@@ -164,26 +171,76 @@ export interface SearchFiltersV2 {
 }
 
 export type AIProviderId = "deepseek" | "openai_compatible";
+export type AIProviderPresetId = "deepseek" | "glm" | "custom";
+
+export interface AICapabilities {
+  text: boolean;
+  structured_output: boolean;
+  vision: boolean;
+  file_upload: boolean;
+}
+
+export interface AIProviderPreset {
+  preset: AIProviderPresetId;
+  label: string;
+  provider: AIProviderId;
+  base_url: string;
+  capability_hints: Record<keyof AICapabilities, boolean | string>;
+}
 
 export interface AISettingsV2 {
   workspace_id: string;
   enabled: boolean;
   provider: AIProviderId;
+  preset?: AIProviderPresetId;
   base_url: string;
   model: string;
   credential_configured: boolean;
   credential_source: "windows_credential" | "environment" | "none";
   credential_error: string;
   vision_enabled: boolean;
+  capabilities?: AICapabilities;
+  capabilities_tested_at?: string;
 }
 
 export interface AISettingsInputV2 {
   enabled: boolean;
   provider: AIProviderId;
+  preset?: AIProviderPresetId;
   base_url: string;
   model: string;
   api_key?: string;
   clear_api_key?: boolean;
+  tested_capabilities?: AICapabilities;
+}
+
+export interface VisionPreflight {
+  workspace_id: string;
+  document_id: string;
+  page_number: number;
+  model: string;
+  mode: "vision" | "ocr_fallback";
+  image_size_bytes: number;
+  width: number;
+  height: number;
+  max_edge: number;
+  pricing_configured: boolean;
+  cost_estimate_status: "usage_based" | "unknown";
+  requires_confirmation: boolean;
+  warning: string;
+}
+
+export interface VisionAnalysis extends VisionPreflight {
+  answer: string;
+  usage: {
+    calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    duration_ms: number;
+    estimated_cost: number | null;
+  };
+  cost_known: boolean;
 }
 
 export interface AIIndexStatus {
@@ -238,6 +295,35 @@ export interface AIConnectionResult {
   ok: boolean;
   code: string;
   message: string;
+  capabilities?: AICapabilities;
+}
+
+export interface WorkspaceResearchResult {
+  query: string;
+  requested_mode: "research";
+  actual_mode: "research" | "degraded";
+  answer: string;
+  results: SearchResultV2[];
+  citations: Array<{
+    citation_id: string;
+    document_id: string;
+    name?: string;
+    relative_path?: string;
+    page_number: number | null;
+    locator?: EvidenceLocator | null;
+    excerpt: string;
+  }>;
+  subqueries: string[];
+  warnings: string[];
+  degradation_reason: string;
+  candidate_count?: number;
+  duration_ms?: number;
+  cost_known?: boolean;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
 }
 
 export interface WorkspaceTaskSlot {
@@ -336,8 +422,13 @@ export interface ResearchPackExportRequest {
   include_sources: boolean;
 }
 
+export type WorkspaceJobRetryPayload =
+  | { kind: "workspace_research"; question: string; limit: number; filters: SearchFiltersV2 }
+  | { kind: "task_proposal"; goal: string; title: string; template_id: TaskTemplateId }
+  | { kind: "task_export"; task_id: string; citation_style: CitationStyle; include_sources: boolean };
+
 export interface WorkspaceJobProgress {
-  phase?: "discovering" | "processing" | "finalizing" | "completed";
+  phase?: "discovering" | "processing" | "finalizing" | "documents" | "document" | "folder" | "understanding" | "retrieving" | "composing" | "verifying" | "collecting_sources" | "packaging" | "completed";
   discovered?: number;
   processed?: number;
   current_file?: string;
@@ -350,6 +441,37 @@ export interface WorkspaceJobProgress {
   unchanged?: number;
   failed?: number;
   removed?: number;
+  total?: number;
+  completed?: number;
+  evidence_count?: number;
+  current_query?: string;
+  calls?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  duration_ms?: number;
+  estimated_cost?: number | null;
+  cost_known?: boolean;
+  retry_payload?: WorkspaceJobRetryPayload;
+}
+
+export interface ExportArtifact {
+  artifact_id: string;
+  workspace_id: string;
+  file_name: string;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+  expires_at: string;
+  included_source_count: number;
+  skipped_source_count: number;
+  warnings: string[];
+}
+
+export interface SavedExportFile {
+  saved: boolean;
+  file?: string;
+  uri?: string;
 }
 
 export interface ServiceJobResult extends Record<string, unknown> {
@@ -359,7 +481,7 @@ export interface ServiceJobResult extends Record<string, unknown> {
 export interface ServiceJob {
   job_id: string;
   repository_id: string;
-  kind: "workspace_sync" | "workspace_rebuild" | "workspace_ai_index" | "task_export" | "update" | "rebuild_search" | "validate" | "package";
+  kind: "workspace_sync" | "workspace_rebuild" | "workspace_ai_index" | "workspace_research" | "task_proposal" | "task_export" | "update" | "rebuild_search" | "validate" | "package";
   status: "queued" | "running" | "succeeded" | "failed" | "canceled" | "interrupted";
   created_at?: string;
   started_at?: string;

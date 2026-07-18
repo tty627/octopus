@@ -2,11 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from octopus.models import GeneratedSummary, GlobalWorkspace
+from octopus.models import AIUsage, GeneratedSummary, GlobalWorkspace
 from octopus.research_ai import (
     confirm_research_proposal,
     create_research_proposal,
     run_ai_index,
+    run_workspace_research,
 )
 from octopus.workspace_v2 import WorkspaceStore
 
@@ -78,6 +79,123 @@ def test_ai_index_is_incremental_and_resumable(tmp_path, monkeypatch):
     second = run_ai_index(workspace.workspace_id, limit=20)
     assert second["errors"] == []
     assert second["status"]["estimated_calls"] == 0
+
+
+def test_failed_ai_cards_retry_only_after_explicit_request(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    import octopus.research_ai as module
+
+    monkeypatch.setattr(module, "get_workspace", lambda _: workspace)
+
+    class FailingProvider(FakeResearchProvider):
+        def __init__(self) -> None:
+            self.usage = AIUsage()
+
+        def generate_leaf(self, document):
+            self.usage.calls += 1
+            raise RuntimeError("quota unavailable")
+
+    failing = FailingProvider()
+    monkeypatch.setattr(module, "create_provider", lambda *args, **kwargs: failing)
+    first = run_ai_index(workspace.workspace_id, scope="documents")
+    assert first["failed"] == 1
+    assert failing.usage.calls == 1
+
+    class CountingProvider(FakeResearchProvider):
+        def __init__(self) -> None:
+            self.usage = AIUsage()
+            self.document_calls = 0
+
+        def generate_leaf(self, document):
+            self.document_calls += 1
+            self.usage.calls += 1
+            return super().generate_leaf(document)
+
+    skipped = CountingProvider()
+    monkeypatch.setattr(module, "create_provider", lambda *args, **kwargs: skipped)
+    second = run_ai_index(workspace.workspace_id, scope="documents")
+    assert second["completed"] == 0
+    assert skipped.document_calls == 0
+
+    retried = CountingProvider()
+    monkeypatch.setattr(module, "create_provider", lambda *args, **kwargs: retried)
+    third = run_ai_index(workspace.workspace_id, scope="documents", retry_failed=True)
+    assert third["completed"] == 1
+    assert retried.document_calls == 1
+
+
+def test_workspace_research_deduplicates_evidence_and_reports_usage(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    import octopus.research_ai as module
+
+    class AnswerProvider:
+        def __init__(self) -> None:
+            self.usage = AIUsage(
+                calls=1,
+                input_tokens=120,
+                output_tokens=30,
+                total_tokens=150,
+                duration_ms=12,
+                estimated_cost=0.003,
+            )
+
+        def _json_call(self, purpose, prompt, payload):
+            assert purpose == "workspace_research"
+            assert payload["candidates"][0]["citation_id"] == "R1"
+            return {
+                "answer": "本地资料支持该结论。",
+                "citation_ids": ["R1", "R999"],
+                "warnings": ["仍需人工核对原文。"],
+            }
+
+    progress: list[dict[str, object]] = []
+    monkeypatch.setattr(module, "get_workspace", lambda _: workspace)
+    monkeypatch.setattr(module, "create_provider", lambda *args, **kwargs: AnswerProvider())
+
+    result = run_workspace_research(
+        workspace.workspace_id,
+        "alpha，以及 alpha evidence",
+        progress.append,
+        search_options={"extensions": [".txt"]},
+    )
+
+    assert result["actual_mode"] == "research"
+    assert result["candidate_count"] == 1
+    assert result["citations"][0]["citation_id"] == "R1"
+    assert result["answer"].endswith("引用：[R1]")
+    assert result["usage"]["total_tokens"] == 150
+    assert result["cost_known"] is True
+    assert result["warnings"] == ["仍需人工核对原文。"]
+    assert [item["phase"] for item in progress][0] == "understanding"
+    assert progress[-1]["phase"] == "completed"
+    assert progress[-1]["evidence_count"] == 1
+
+
+def test_workspace_research_keeps_local_results_when_ai_citation_is_invalid(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = _workspace(tmp_path)
+    import octopus.research_ai as module
+
+    class InvalidCitationProvider:
+        def _json_call(self, *args, **kwargs):
+            return {"answer": "不能接受的结论 [R999]", "citation_ids": ["R999"]}
+
+    monkeypatch.setattr(module, "get_workspace", lambda _: workspace)
+    monkeypatch.setattr(
+        module,
+        "create_provider",
+        lambda *args, **kwargs: InvalidCitationProvider(),
+    )
+
+    result = run_workspace_research(workspace.workspace_id, "alpha evidence")
+
+    assert result["actual_mode"] == "degraded"
+    assert result["degradation_reason"] == "ValueError"
+    assert result["candidate_count"] == 1
+    assert result["answer"] == "在当前资料空间中找到 1 份相关资料。"
+    assert result["warnings"] == ["辅助模型不可用，本次保留本地检索结果。"]
 
 
 def test_research_proposal_only_uses_server_candidates(tmp_path, monkeypatch):
