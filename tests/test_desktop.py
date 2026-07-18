@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import io
+import json
 import sys
+import urllib.error
+import urllib.request
 from types import SimpleNamespace
 from typing import Any
 
@@ -199,6 +203,109 @@ def test_runtime_client_restarts_an_older_local_api(
     assert client.base_url == "http://127.0.0.1:8765"
     assert stopped == [True]
     assert started == [True]
+
+
+def test_local_api_client_serializes_json_and_maps_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LocalApiClient("http://127.0.0.1:9876", "memory-token")
+    requests: list[urllib.request.Request] = []
+
+    def success(request: urllib.request.Request, *, timeout: float):
+        requests.append(request)
+        assert timeout == client.timeout
+        return io.BytesIO(json.dumps({"saved": True}).encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", success)
+    assert client._request("POST", "/v2/test", {"name": "研究包"}) == {"saved": True}
+    request = requests[0]
+    assert request.full_url == "http://127.0.0.1:9876/v2/test"
+    assert request.method == "POST"
+    assert request.get_header("Authorization") == "Bearer memory-token"
+    assert json.loads(request.data.decode("utf-8")) == {"name": "研究包"}
+
+    def unauthorized(*args: Any, **kwargs: Any):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:9876/v2/test",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b'{"detail":"bad key"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", unauthorized)
+    with pytest.raises(DesktopServiceError) as captured:
+        client._request("GET", "/v2/test")
+    assert captured.value.status_code == 401
+    assert str(captured.value) == "bad key"
+
+    def offline(*args: Any, **kwargs: Any):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", offline)
+    with pytest.raises(DesktopServiceError) as captured:
+        client._request("GET", "/v2/test")
+    assert captured.value.code == "service_unavailable"
+
+
+def test_local_api_client_streams_artifacts_and_preserves_download_errors(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LocalApiClient("http://127.0.0.1:9876", "memory-token")
+    archive = b"PK" + (b"research archive" * 100)
+    requests: list[urllib.request.Request] = []
+
+    def success(request: urllib.request.Request, *, timeout: float):
+        requests.append(request)
+        assert timeout == 15
+        return io.BytesIO(archive)
+
+    monkeypatch.setattr(urllib.request, "urlopen", success)
+    destination = tmp_path / "artifact.tmp"
+    written = client.download_export_artifact(
+        "workspace with spaces",
+        "a" * 32,
+        destination,
+        timeout=15,
+    )
+    assert written == len(archive)
+    assert destination.read_bytes() == archive
+    assert requests[0].full_url.endswith(
+        "/v2/workspaces/workspace%20with%20spaces/exports/" + ("a" * 32)
+    )
+    assert requests[0].get_header("Accept") == "application/zip"
+
+    def expired(*args: Any, **kwargs: Any):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:9876/export",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'{"detail":"artifact expired"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", expired)
+    with pytest.raises(DesktopServiceError) as captured:
+        client.download_export_artifact(
+            "workspace",
+            "b" * 32,
+            tmp_path / "missing.tmp",
+        )
+    assert captured.value.code == "artifact_download_failed"
+    assert captured.value.status_code == 404
+    assert str(captured.value) == "artifact expired"
+
+    def interrupted(*args: Any, **kwargs: Any):
+        raise urllib.error.URLError("stream interrupted")
+
+    monkeypatch.setattr(urllib.request, "urlopen", interrupted)
+    with pytest.raises(DesktopServiceError, match="stream interrupted"):
+        client.download_export_artifact(
+            "workspace",
+            "c" * 32,
+            tmp_path / "interrupted.tmp",
+        )
 
 
 def test_frozen_gui_uses_sibling_cli_for_background_commands(
